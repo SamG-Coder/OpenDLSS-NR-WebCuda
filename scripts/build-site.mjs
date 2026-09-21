@@ -8,7 +8,7 @@ for(const name of ['gpu.html','gpu.js']){await mkdir('site/tests',{recursive:tru
 for(const folder of ['build','examples/jsm'])await cp('node_modules/three/'+folder,'site/node_modules/three/'+folder,{recursive:true});
 await cp('node_modules/three/LICENSE','site/node_modules/three/LICENSE');
 await cp('vendor/webcuda/LICENSE','site/vendor/webcuda/LICENSE');
-for(const name of ['LICENSE','PROVENANCE.md','README.md'])await cp(name,'site/'+name);
+for(const name of ['LICENSE','THIRD_PARTY_NOTICES.md','PROVENANCE.md','README.md'])await cp(name,'site/'+name);
 const html=await readFile('web/index.html','utf8');
 const relative=prefix=>html.replace(/(href|src)="\/(?!\/)/g,`$1="${prefix}`).replaceAll('"/node_modules/',`"${prefix}node_modules/`);
 await writeFile('site/index.html',relative('./'));

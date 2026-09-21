@@ -135,7 +135,7 @@ It adds `__float_as_uint`, `__uint_as_float`, `__float_as_int`, and `__int_as_fl
 
 ## Provenance and license
 
-See `PROVENANCE.md`, `LICENSE`, and `vendor/webcuda/LICENSE`. Native reference files are not distributed; optional native tests read a separate checkout selected by `NR_NATIVE_SOURCE`. No model weights are distributed. This project is not affiliated with NVIDIA.
+Original work in this project is **Copyright (c) 2026 SamG-Coder**, licensed under the [MIT License](LICENSE). Credit and retained notices for upstream-derived portions and dependencies are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); the source mapping is in [PROVENANCE.md](PROVENANCE.md). Native reference files are not distributed; optional native tests read a separate checkout selected by `NR_NATIVE_SOURCE`. No model weights are distributed. This project is not affiliated with NVIDIA.
 
 ## GitHub Actions and Pages
 
