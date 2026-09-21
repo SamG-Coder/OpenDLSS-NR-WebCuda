@@ -8,6 +8,18 @@ try {
   const manifest=await (await fetch('../generated/manifest.json')).json(),kernels={};
   for(const [name,file] of Object.entries(manifest))kernels[name]=await runtime.kernel(await(await fetch('../generated/'+file)).json());
   check('All CUDA-generated shaders create GPU pipelines',true,Object.keys(kernels).length+' kernels');
+  const packedSource=await(await fetch('../generated/gemm.cu')).text();
+  const decoder=await runtime.kernel(packedSource+`\n__global__ void decode_packed_test(const unsigned* input, float* output, unsigned count, int halfMode) { unsigned i=blockIdx.x*blockDim.x+threadIdx.x; if(i<count) output[i]=nr_packed_weight(input[i/(halfMode!=0?2u:4u)],i,halfMode); }`,{entry:'decode_packed_test',workgroupSize:[64,1,1]});
+  for(const halfMode of [0,1]) {
+    const count=halfMode?65536:256,lanes=halfMode?2:4,packed=new Uint32Array(count/lanes);
+    for(let i=0;i<count;i++)packed[Math.floor(i/lanes)]|=i<<((i%lanes)*(halfMode?16:8));
+    const input=runtime.createBuffer(packed),output=runtime.createBuffer(count*4);
+    runtime.batch().dispatch(decoder.bind({input,output},{count,halfMode}),[Math.ceil(count/64),1,1]).submit();
+    const decoded=await runtime.read(output);let mismatches=0;
+    for(let i=0;i<count;i++)if(!Object.is(decoded[i],halfMode?half(i):e4(i)))mismatches++;
+    check(`Packed GPU decoding: all ${count} ${halfMode?'half':'FP8'} patterns`,mismatches===0,`${mismatches} mismatches`);
+    runtime.destroyBuffer(input);runtime.destroyBuffer(output);
+  }
   const dispatch=(entry,bindings,scalars,count)=>runtime.batch().dispatch(kernels[entry].bind(bindings,scalars),[Math.ceil(count/64),1,1]).submit();
   // Exhaust every finite half bit pattern, plus NaNs/infinities, without assuming float32 NaN payloads survive.
   const values=Float32Array.from({length:65536},(_,i)=>half(i));
@@ -80,5 +92,19 @@ try {
   check('Cancellation discards pending commands and releases inference buffers',cancelled&&!engine.busy&&runtime.buffers.size===resourcesBefore);
   const restarted=await engine.run(args);
   check('Renderer can restart after cancellation with identical output',restarted.head.every((x,i)=>Object.is(x,run.head[i]))&&runtime.buffers.size===resourcesBefore);
+  const persistentModel={...synthetic,packedMatrix:(name,offset,K,N,{batches=1,halfMode})=>new Uint32Array(Math.ceil(K*N*batches/(halfMode?2:4)))};
+  const persistent=new NeuralRenderer(runtime,kernels,persistentModel);
+  await persistent.run(args);
+  const cacheBytes=persistent.weightCacheBytes,cacheSize=persistent.weightCache.size,uploaded=runtime.stats.dataBytesUploaded;
+  const warm=await persistent.run(args);
+  check('Packed model persists without weight uploads on repeated renders',cacheBytes>0&&persistent.weightCacheBytes===cacheBytes&&persistent.weightCache.size===cacheSize&&runtime.stats.dataBytesUploaded-uploaded===args.inputFeatures.byteLength+4&&warm.head.every((x,i)=>Object.is(x,run.head[i])));
+  persistent.clearWeightCache();
+  check('Clearing packed cache releases all model buffers',persistent.weightCacheBytes===0&&persistent.weightCache.size===0&&runtime.buffers.size===resourcesBefore);
+  const cancelPacked=new AbortController();let packedCancelled=false;
+  try{await persistent.run({...args,signal:cancelPacked.signal,onProgress:({index})=>{if(index===3)cancelPacked.abort();}});}catch(e){packedCancelled=e.name==='AbortError';}
+  const partialSize=persistent.weightCache.size;
+  const recovered=await persistent.run(args);
+  check('Cancelled packed cache can resume without stale resources',packedCancelled&&partialSize>0&&persistent.weightCache.size===cacheSize&&recovered.head.every((x,i)=>Object.is(x,run.head[i])));
+  persistent.clearWeightCache();
 } catch(error) {check('GPU execution',false,String(error.stack||error));}
 finally {runtime?.dispose();window.report=report;document.querySelector('#result').textContent=JSON.stringify(report,null,2);}

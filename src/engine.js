@@ -10,7 +10,12 @@ export class NeuralRenderer {
       return new NeuralRenderer(runtime,kernels,model);
     } catch(e) {runtime.dispose();throw e;}
   }
-  constructor(runtime,kernels,model) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;}
+  constructor(runtime,kernels,model) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;}
+  clearWeightCache() {
+    if(this.busy)throw Error('Cancel and await inference before clearing weights.');
+    for(const b of this.weightCache.values())this.runtime.destroyBuffer(b);
+    this.weightCache.clear();this.weightCacheBytes=0;
+  }
   dispatch(entry,bindings,scalars,count,batch) {
     const groups=Math.ceil(count/64),limit=this.runtime.device.limits.maxComputeWorkgroupsPerDimension;
     if(groups>limit*limit)throw Error(`${entry}: dispatch exceeds device limits.`);
@@ -63,15 +68,19 @@ export class NeuralRenderer {
           if(typeof spec==='string') {if(!live.has(spec))live.set(spec,take(graph.resources.get(spec).bytes));bindings[key]=live.get(spec);}
           else if(spec.kind==='zero')bindings[key]=zero;
           else {
+            const persistent=typeof model.packedMatrix==='function',cacheKey=JSON.stringify(spec);
+            const cached=persistent&&this.weightCache.get(cacheKey);
+            if(cached){bindings[key]=cached;continue;}
             let data;
-            if(spec.kind==='matrix')data=model.matrix(spec.name,spec.offset,spec.K,spec.N,spec);
+            if(spec.kind==='matrix')data=persistent?model.packedMatrix(spec.name,spec.offset,spec.K,spec.N,spec):model.matrix(spec.name,spec.offset,spec.K,spec.N,spec);
             if(spec.kind==='vector')data=model.vector(spec.name,spec.offset,spec.count,spec.type);
             if(spec.kind==='prior')data=model.prior(spec.name,spec.offset,spec.heads);
-            const b=alloc(data);bindings[key]=b;weights.push(b);
+            const b=persistent?runtime.createBuffer(data):alloc(data);bindings[key]=b;
+            if(persistent){this.weightCache.set(cacheKey,b);this.weightCacheBytes+=b.size;}else weights.push(b);
           }
         }
         batch??=runtime.batch();
-        this.dispatch(op.entry,bindings,op.scalars,op.count,batch);queuedOps++;
+        this.dispatch(op.entry==='nr_gemm'&&typeof model.packedMatrix==='function'?'nr_gemm_packed':op.entry,bindings,op.scalars,op.count,batch);queuedOps++;
         for(const b of weights)retire(b);model.cache.clear();
         // Keep intermediates queue-ordered, and retain resources until submitted work finishes.
         // Bound both cancellation latency and transient uploads, rather than waiting every op.
@@ -92,5 +101,5 @@ export class NeuralRenderer {
       return {head,output,geometry:g,dispatches:graph.ops.length};
     } finally {batch?.discard();await runtime.idle().catch(()=>{});for(const b of owned)runtime.destroyBuffer(b);this.model.cache.clear();this.busy=false;}
   }
-  dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.runtime.dispose();}
+  dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.weightCache.clear();this.weightCacheBytes=0;this.runtime.dispose();}
 }

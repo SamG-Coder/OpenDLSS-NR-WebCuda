@@ -43,6 +43,17 @@ export class Model {
   tensor(block,layer=0,parameter='layer') { const name=`block${block}.layer${layer}.${parameter}`;if(!this.tensors.has(name))throw Error('Missing tensor '+name);return name; }
   bytes(name,offset,length) {const t=this.tensors.get(name);if(!t||offset<0||offset+length>t.length)throw Error('Tensor bounds: '+name);return new DataView(t.buffer,t.byteOffset+offset,length);}
   vector(name,offset,count,type='half') {const v=this.bytes(name,offset,count*(type==='half'?2:4));return Float32Array.from({length:count},(_,i)=>type==='half'?halfValues[v.getUint16(i*2,true)]:v.getFloat32(i*4,true));}
+  packedMatrix(name,offset,K,N,{batches=1,halfMode=false}={}) {
+    // Reorder original codes without expanding or requantizing model values.
+    const lanes=halfMode?2:4,out=new Uint32Array(Math.ceil(batches*K*N/lanes));
+    const length=batches*K*(halfMode?Math.ceil(N/16)*16*2:N),v=this.bytes(name,offset,length);
+    for(let batch=0;batch<batches;batch++)for(let k=0;k<K;k++)for(let n=0;n<N;n++) {
+      const source=halfMode?2*(batch*K*Math.ceil(N/16)*16+halfIndex(k,n,N)):packedIndex(batch*K+inverseInput(k),n,N);
+      const code=halfMode?v.getUint16(source,true):v.getUint8(source),i=(batch*K+k)*N+n;
+      out[Math.floor(i/lanes)]|=code<<((i%lanes)*(halfMode?16:8));
+    }
+    return out;
+  }
   matrix(name,offset,K,N,{batches=1,halfMode=false}={}) {
     const key=[name,offset,K,N,batches,halfMode].join('/');if(this.cache.has(key))return this.cache.get(key);
     const out=new Float32Array(batches*K*N),t=this.tensors.get(name);if(!t)throw Error('Missing tensor '+name);

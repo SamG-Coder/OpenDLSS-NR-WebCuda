@@ -19,7 +19,7 @@ try {
     const proxy=new Float32Array(width*height*4);
     for(let y=0;y<height;y++)for(let x=0;x<width;x++){const p=(y*width+x)*4;proxy[p]=x/(width-1);proxy[p+1]=y/(height-1);proxy[p+2]=0.4;proxy[p+3]=1;}
     let decodeMs=0,waitMs=0,waits=0;
-    for(const name of ['matrix','vector','prior']){const original=model[name].bind(model);model[name]=(...args)=>{const t=performance.now();try{return original(...args);}finally{decodeMs+=performance.now()-t;}};}
+    for(const name of ['matrix','packedMatrix','vector','prior']){if(!model[name])continue;const original=model[name].bind(model);model[name]=(...args)=>{const t=performance.now();try{return original(...args);}finally{decodeMs+=performance.now()-t;}};}
     const idle=runtime.idle.bind(runtime);runtime.idle=async()=>{const t=performance.now();waits++;try{return await idle();}finally{waitMs+=performance.now()-t;}};
     const hash=async data=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),b=>b.toString(16).padStart(2,'0')).join('');
     try {
@@ -28,7 +28,8 @@ try {
         const output=await engine.run({width,height,proxy});
         const elapsedMs=performance.now()-start;
         if(!output.output.every(Number.isFinite)||!output.head.every(Number.isFinite))throw Error('Non-finite benchmark output.');
-        const measurement={run:run+1,elapsedMs,decodeMs,waitMs,waits,submissions:runtime.stats.submissions-before.submissions,headSha256:await hash(output.head),outputSha256:await hash(output.output)};
+        const measurement={run:run+1,elapsedMs,decodeMs,waitMs,waits,weightCacheBytes:engine.weightCacheBytes,dataBytesUploaded:runtime.stats.dataBytesUploaded-before.dataBytesUploaded,submissions:runtime.stats.submissions-before.submissions,headSha256:await hash(output.head),outputSha256:await hash(output.output)};
+        if(run>0&&engine.weightCacheBytes>0&&measurement.dataBytesUploaded!==proxy.byteLength+4)throw Error('Warm render unexpectedly uploaded model data.');
         measurements.push(measurement);console.log(JSON.stringify(measurement));
       }
       return {width,height,adapter:runtime.describe(),measurements};
