@@ -1,0 +1,75 @@
+From 25673c64507c397dfa98195f37798654b7ba1d04 Mon Sep 17 00:00:00 2001
+From: SamG-Coder <13449963+SamG-Coder@users.noreply.github.com>
+Date: Tue, 22 Sep 2026 07:55:52 +1000
+Subject: [PATCH] Support CUDA scalar float/integer bit reinterpretation
+ intrinsics
+
+---
+ src/compiler/compiler.js       |  6 ++++++
+ src/compiler/cpu-oracle.js     |  6 ++++++
+ tests/bit-reinterpret.test.mjs | 19 +++++++++++++++++++
+ 3 files changed, 31 insertions(+)
+ create mode 100644 tests/bit-reinterpret.test.mjs
+
+diff --git a/src/compiler/compiler.js b/src/compiler/compiler.js
+index 7ad589c..4a1f433 100644
+--- a/src/compiler/compiler.js
++++ b/src/compiler/compiler.js
+@@ -762,6 +762,12 @@ class Emitter {
+     if(name==='float'&&n.args.length===1){const value=this.expr({kind:'cast',target:'f32',value:n.args[0],token:n.token});return this.result(n,'f32',value.code,value.pre);}
+     const args = n.args.map(a => this.argument(a)), pre = args.flatMap(a => a.pre);
+     if(n.printfIntegerArguments&&args.some(a=>!['i32','u32','cw_short','cw_ushort','cw_uchar','bool'].includes(a.type)))this.fail('Diagnostic integer formats require integer arguments.',n);
++    if (['__float_as_uint','__uint_as_float','__float_as_int','__int_as_float'].includes(name)) {
++      const types = {__float_as_uint:['f32','u32'],__uint_as_float:['u32','f32'],__float_as_int:['f32','i32'],__int_as_float:['i32','f32']};
++      const [from,to] = types[name];
++      if(args.length!==1 || args[0].type!==from) this.fail(name+' requires one '+from+' argument.',n);
++      return this.result(n,to,`bitcast<${to}>(${args[0].code})`,pre);
++    }
+     if(name==='isfinite'){if(args.length!==1||args[0].type!=='f32')this.fail('isfinite currently supports one float argument.',n);return this.result(n,'bool',`((bitcast<u32>(${args[0].code}) & 2139095040u) != 2139095040u)`,pre);}
+     if(name==='__mul24'||name==='__umul24'){
+       if(args.length!==2||args.some(a=>!['i32','u32'].includes(a.type)))this.fail(`${name} requires two 32-bit integer arguments.`,n);
+diff --git a/src/compiler/cpu-oracle.js b/src/compiler/cpu-oracle.js
+index 04fcf8a..3a4fc63 100644
+--- a/src/compiler/cpu-oracle.js
++++ b/src/compiler/cpu-oracle.js
+@@ -136,6 +136,12 @@ class Context {
+     if(name==='make_float4'&&Array.isArray(args[0]))return [...args[0],args[1]];
+     if(name==='length'&&!n.userHelper)return f(Math.sqrt(args[0].reduce((sum,a)=>f(sum+f(a*a)),0)));
+     if(!n.userHelper&&(name==='dot'||name==='normalize')){const sum=args[0].reduce((sum,a,i)=>f(sum+f(a*(name==='dot'?args[1][i]:a))),0);return name==='dot'?sum:args[0].map(a=>f(a/Math.sqrt(sum)));}
++    if(['__float_as_uint','__float_as_int','__uint_as_float','__int_as_float'].includes(name)) {
++      const bits=new DataView(new ArrayBuffer(4));
++      if(name.startsWith('__float_as_')) { bits.setFloat32(0,args[0],true);return name==='__float_as_uint'?bits.getUint32(0,true):bits.getInt32(0,true); }
++      if(name==='__uint_as_float')bits.setUint32(0,args[0],true);else bits.setInt32(0,args[0],true);
++      return bits.getFloat32(0,true);
++    }
+     if(name==='isfinite')return Number.isFinite(args[0]);
+     if(['fminf','fmaxf'].includes(name)&&Array.isArray(args[0]))return args[0].map((a,i)=>f(name==='fminf'?Math.min(a,args[1][i]):Math.max(a,args[1][i])));
+     if(/^make_(float|uint|int)[234]$/.test(name))return (args.length===1?Array(vectorLength(n.type)).fill(args[0]):args).map(v=>convert(v,vectorElement(n.type)));
+diff --git a/tests/bit-reinterpret.test.mjs b/tests/bit-reinterpret.test.mjs
+new file mode 100644
+index 0000000..1277500
+--- /dev/null
++++ b/tests/bit-reinterpret.test.mjs
+@@ -0,0 +1,19 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {compile} from '../src/compiler/compiler.js';
++import {executeCPU} from '../src/compiler/cpu-oracle.js';
++test('CUDA scalar bit reinterpretation preserves finite IEEE bits and signed zero',()=>{
++  const source=`__global__ void bits(const unsigned* input,unsigned* output,int* signedOutput){unsigned i=threadIdx.x;float f=__uint_as_float(input[i]);output[i]=__float_as_uint(f);signedOutput[i]=__float_as_int(__int_as_float((int)input[i]));}`;
++  const c=compile(source,{workgroupSize:[8,1,1]});
++  assert.match(c.wgsl,/bitcast<f32>/);assert.match(c.wgsl,/bitcast<u32>/);assert.match(c.wgsl,/bitcast<i32>/);
++  const input=new Uint32Array([0,0x80000000,0x3f800000,0xbf800000,0x00800000,0x7f7fffff,0x7f800000,0xff800000]);
++  const output=new Uint32Array(8),signedOutput=new Int32Array(8);
++  executeCPU(c,{input,output,signedOutput},{},[1]);
++  assert.deepEqual(output,input);assert.deepEqual(new Uint32Array(signedOutput.buffer),input);
++});
++for(const [name,arg] of [['__float_as_uint','1u'],['__float_as_int','1'],['__uint_as_float','1.0f'],['__int_as_float','1u']])test(name+' rejects a wrong argument type',()=>{
++  assert.throws(()=>compile(`__global__ void bad(float* out){out[0]=(float)${name}(${arg});}`),/requires one/);
++});
++test('bit reinterpretation rejects incorrect arity',()=>{
++  assert.throws(()=>compile('__global__ void bad(float* out){out[0]=__uint_as_float();}'),/requires one/);
++});
+-- 
+2.55.0.windows.3
+

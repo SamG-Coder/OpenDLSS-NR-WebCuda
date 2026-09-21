@@ -1,0 +1,97 @@
+{
+  "upstreamNativeRevision": "9d08f4184bbcb9d858e2fb7a7834ec0837a9d2f1",
+  "webcudaBaseRevision": "d1abd25c32b93d40ce13c7757fccdd0ce6e2f01a",
+  "webcudaFixRevision": "25673c64507c397dfa98195f37798654b7ba1d04",
+  "platform": "Windows, NVIDIA Blackwell, Microsoft Edge WebGPU",
+  "cudaKernels": 12,
+  "hostTests": {
+    "passed": 18,
+    "failed": 0
+  },
+  "webcudaTests": {
+    "passed": 762,
+    "failed": 0
+  },
+  "nativeCudaCases": 24,
+  "independentNativeCpuChecks": [
+    "F13 FP8 GEMM, two batches, residual seeds, unsplit and split-K",
+    "F24 f16 GEMM, two batches, residual seeds, unsplit and split-K",
+    "E4 publication and SiLU over all 65536 half patterns and 8192 random f32 inputs"
+  ],
+  "webgpuChecks": {
+    "passed": 41,
+    "failed": 0
+  },
+  "syntheticFullGraph": {
+    "dispatches": 653,
+    "boundaries": 75,
+    "passed": true,
+    "weights": "zeros",
+    "geometry": "tiny test-only override"
+  },
+  "browserUi": {
+    "passed": true,
+    "checks": [
+      "native conditioning defaults",
+      "original image resolution 320x192",
+      "custom image aspect ratio",
+      "GPU buffer preflight",
+      "GLB import",
+      "glTF with external buffer import",
+      "missing glTF asset preserves working object",
+      "3D NR output and PNG at 192x128",
+      "image NR output at 320x192 and 256x256",
+      "cancel and restart",
+      "controls locked while rendering",
+      "PNG and settings download",
+      "side-by-side and wipe",
+      "invalid temporal and feature file rejection",
+      "invalid DLL replacement preserves model",
+      "390px mobile viewport without horizontal overflow",
+      "no page errors or network uploads",
+      "512x512 3D preview before model setup",
+      "512x512 real NR render after model setup"
+    ]
+  },
+  "realWeightsAvailable": true,
+  "originalCapturesAvailable": false,
+  "realModelParity": "NOT RUN",
+  "realTimePerformance": "NOT CLAIMED",
+  "nativeFilamentDemoPorted": false,
+  "realModelInference": {
+    "passed": true,
+    "dllVersion": "310.8.0.0",
+    "dllSha256": "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e",
+    "sourceSize": [
+      33,
+      33
+    ],
+    "nativePaddedSize": [
+      320,
+      320
+    ],
+    "dispatches": 653,
+    "elapsedSeconds": 4.85,
+    "output": "nonconstant and different from input",
+    "originalCaptureParity": "NOT RUN"
+  },
+  "conditioningDiagnosis": {
+    "cause": "Interactive defaults were tone=0, structure=0, autoMask=0; native demo uses 1,1,1",
+    "fixed": true,
+    "apiDefaultsBitExactWithExplicitNativeSettings": true,
+    "source": "GTA V face crop 256x256",
+    "meanRgbDifferenceBefore": 0.047724405924479164,
+    "meanRgbDifferenceAfter": 5.755859375,
+    "maxRgbDifferenceBefore": 2,
+    "maxRgbDifferenceAfter": 38
+  },
+  "threeSceneInput": {
+    "library": "three@0.186.0",
+    "mode": "single frame",
+    "formats": [
+      "GLB",
+      "glTF"
+    ],
+    "automaticMotionVectors": false
+  }
+}

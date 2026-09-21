@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {assessResolution} from '../src/resolution.js';
+
+test('512-square preview is not rejected using a guessed pre-model GPU limit',()=>{
+  const result=assessResolution(512,512);
+  assert.equal(result.requiredBufferBytes,144*1048576);
+  assert.equal(result.inferenceError,null);
+});
+test('NR eligibility uses the actual device limit and does not invalidate preview geometry',()=>{
+  const limited=assessResolution(512,512,128*1048576);
+  assert.match(limited.inferenceError,/source preview is still available/);
+  assert.equal(limited.geometry.width,512);
+  assert.equal(assessResolution(512,512,256*1048576).inferenceError,null);
+});

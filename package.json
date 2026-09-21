@@ -1,0 +1,24 @@
+{
+  "name": "opendlss-nr-webcuda",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "start": "node scripts/serve.mjs",
+    "test:gpu": "node scripts/test-gpu.mjs",
+    "test:ui": "node scripts/test-ui.mjs",
+    "test:real": "node scripts/test-real-model.mjs",
+    "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native.ps1",
+    "build:site": "node scripts/build-site.mjs",
+    "audit:public": "node scripts/audit-public.mjs",
+    "test:site": "node scripts/test-site.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  },
+  "dependencies": {
+    "three": "0.186.0"
+  }
+}

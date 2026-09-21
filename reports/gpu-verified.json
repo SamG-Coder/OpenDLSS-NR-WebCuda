@@ -1,0 +1,230 @@
+{
+  "passed": 41,
+  "failed": 0,
+  "checks": [
+    {
+      "name": "All CUDA-generated shaders create GPU pipelines",
+      "ok": true,
+      "detail": "12 kernels"
+    },
+    {
+      "name": "65,536 half patterns: half publication",
+      "ok": true,
+      "detail": "0 mismatches"
+    },
+    {
+      "name": "65,536 half patterns: E4M3 RNE, saturation, NaN, signed zero",
+      "ok": true,
+      "detail": "0 mismatches"
+    },
+    {
+      "name": "2D dispatch crosses the 65,535-workgroup boundary and preserves tail guards",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "FP8 GEMM seeds the residual accumulator",
+      "ok": true,
+      "detail": "17,17,17,17"
+    },
+    {
+      "name": "Shifted zero windows are finite zeros",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Native CUDA parity: gemm-0-0/raw",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-0-0/output",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-0-32/raw",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-0-32/output",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-1-0/raw",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-1-0/output",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-1-32/raw",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: gemm-1-32/output",
+      "ok": true,
+      "detail": "448 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: numeric-all-half/output",
+      "ok": true,
+      "detail": "196608 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: numeric-all-half/codes",
+      "ok": true,
+      "detail": "65536 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: numeric-random-f32/output",
+      "ok": true,
+      "detail": "24576 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: numeric-random-f32/codes",
+      "ok": true,
+      "detail": "8192 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: normalize-0/output",
+      "ok": true,
+      "detail": "2496 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: scores-0-0/scores",
+      "ok": true,
+      "detail": "8064 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: attend-0-0/output",
+      "ok": true,
+      "detail": "4032 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: scores-0-4/scores",
+      "ok": true,
+      "detail": "8064 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: attend-0-4/output",
+      "ok": true,
+      "detail": "4032 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: softmax-0/weights",
+      "ok": true,
+      "detail": "16128 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: softmax-0/inverse",
+      "ok": true,
+      "detail": "126 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: normalize-1/output",
+      "ok": true,
+      "detail": "2496 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: scores-1-0/scores",
+      "ok": true,
+      "detail": "8064 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: attend-1-0/output",
+      "ok": true,
+      "detail": "4032 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: scores-1-4/scores",
+      "ok": true,
+      "detail": "8064 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: attend-1-4/output",
+      "ok": true,
+      "detail": "4032 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: softmax-1/weights",
+      "ok": true,
+      "detail": "16128 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: softmax-1/inverse",
+      "ok": true,
+      "detail": "126 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: pool-padding/output",
+      "ok": true,
+      "detail": "512 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: merge-0/raw",
+      "ok": true,
+      "detail": "1536 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: merge-0/output",
+      "ok": true,
+      "detail": "1536 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: merge-1/raw",
+      "ok": true,
+      "detail": "1536 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: merge-1/output",
+      "ok": true,
+      "detail": "1536 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: compose/output",
+      "ok": true,
+      "detail": "252 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: preprocess/features",
+      "ok": true,
+      "detail": "25600 words, 0 mismatches"
+    },
+    {
+      "name": "Native CUDA parity: reproject/output",
+      "ok": true,
+      "detail": "252 words, 0 mismatches"
+    },
+    {
+      "name": "Complete graph executes all 75 comparable boundaries (synthetic weights, tiny test geometry)",
+      "ok": true,
+      "detail": "653 dispatches, 75 boundaries"
+    }
+  ],
+  "adapter": {
+    "vendor": "nvidia",
+    "architecture": "blackwell",
+    "device": "",
+    "description": "",
+    "features": [
+      "core-features-and-limits",
+      "subgroup-size-control",
+      "float32-filterable",
+      "timestamp-query",
+      "subgroups"
+    ],
+    "timestampQuery": true,
+    "limits": {
+      "maxComputeInvocationsPerWorkgroup": 1024,
+      "maxComputeWorkgroupStorageSize": 16384,
+      "maxStorageBufferBindingSize": 268435456
+    }
+  }
+}
