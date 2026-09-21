@@ -71,5 +71,14 @@ try {
   const engine=new NeuralRenderer(runtime,kernels,synthetic),boundaries=[];
   const run=await engine.run({width:2,height:2,inputFeatures:new Float32Array(64),geometryOverride:{width:2,height:2,fullWidth:2,fullHeight:2,levels:Array.from({length:6},()=>({width:1,height:1}))},capture:(name,data)=>{if(!data.every(x=>x===0))throw Error('Nonzero synthetic boundary '+name);boundaries.push(name);}});
   check('Complete graph executes all 75 comparable boundaries (synthetic weights, tiny test geometry)',boundaries.length===75&&new Set(boundaries).size===75&&run.head.every(x=>x===0),`${run.dispatches} dispatches, ${boundaries.length} boundaries`);
+  const args={width:2,height:2,inputFeatures:new Float32Array(64),geometryOverride:{width:2,height:2,fullWidth:2,fullHeight:2,levels:Array.from({length:6},()=>({width:1,height:1}))}};
+  const resourcesBefore=runtime.buffers.size,submissionsBefore=runtime.stats.submissions;
+  const batched=await engine.run(args);
+  check('Batched graph preserves captured output and releases all inference buffers',batched.head.every((x,i)=>Object.is(x,run.head[i]))&&runtime.buffers.size===resourcesBefore&&runtime.stats.submissions-submissionsBefore<run.dispatches);
+  const abort=new AbortController();let cancelled=false;
+  try{await engine.run({...args,signal:abort.signal,onProgress:({index})=>{if(index===3)abort.abort();}});}catch(e){cancelled=e.name==='AbortError';}
+  check('Cancellation discards pending commands and releases inference buffers',cancelled&&!engine.busy&&runtime.buffers.size===resourcesBefore);
+  const restarted=await engine.run(args);
+  check('Renderer can restart after cancellation with identical output',restarted.head.every((x,i)=>Object.is(x,run.head[i]))&&runtime.buffers.size===resourcesBefore);
 } catch(error) {check('GPU execution',false,String(error.stack||error));}
 finally {runtime?.dispose();window.report=report;document.querySelector('#result').textContent=JSON.stringify(report,null,2);}

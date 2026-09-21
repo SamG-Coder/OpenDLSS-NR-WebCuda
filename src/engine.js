@@ -11,17 +11,27 @@ export class NeuralRenderer {
     } catch(e) {runtime.dispose();throw e;}
   }
   constructor(runtime,kernels,model) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;}
-  dispatch(entry,bindings,scalars,count) {
+  dispatch(entry,bindings,scalars,count,batch) {
     const groups=Math.ceil(count/64),limit=this.runtime.device.limits.maxComputeWorkgroupsPerDimension;
     if(groups>limit*limit)throw Error(`${entry}: dispatch exceeds device limits.`);
-    this.runtime.batch().dispatch(this.kernels[entry].bind(bindings,scalars),[Math.min(groups,limit),Math.ceil(groups/limit),1]).submit();
+    const commands=batch??this.runtime.batch();
+    commands.dispatch(this.kernels[entry].bind(bindings,scalars),[Math.min(groups,limit),Math.ceil(groups/limit),1]);
+    if(!batch)commands.submit();
   }
   async run({width,height,proxy,inputFeatures,history,motion,seed=0,conditioning={},onProgress=()=>{},capture,signal,geometryOverride}={}) {
     if(this.busy)throw Error('An inference is already running.');this.busy=true;
     const runtime=this.runtime,model=this.model,live=new Map(),pool=new Map(),owned=new Set();
     let poolBytes=0;const poolLimit=256*1024*1024;
+    let batch=null,queuedOps=0,retiredBytes=0;const retired=[];
+    const retire=b=>{retired.push(b);retiredBytes+=b.size;};
+    const flush=async()=>{
+      if(batch){batch.submit();batch=null;}
+      await runtime.idle();
+      for(const b of retired){runtime.destroyBuffer(b);owned.delete(b);}
+      retired.length=0;retiredBytes=0;queuedOps=0;
+    };
     const alloc=data=>{const b=runtime.createBuffer(data);owned.add(b);return b;};
-    const release=b=>{if(poolBytes+b.size>poolLimit){runtime.destroyBuffer(b);owned.delete(b);return;}const list=pool.get(b.size)||[];list.push(b);pool.set(b.size,list);poolBytes+=b.size;};
+    const release=b=>{if(poolBytes+b.size>poolLimit){retire(b);return;}const list=pool.get(b.size)||[];list.push(b);pool.set(b.size,list);poolBytes+=b.size;};
     const take=size=>{const b=pool.get(size)?.pop();if(b){poolBytes-=b.size;return b;}return alloc(size);};
     try {
       const graph=createGraph(width,height,{geometryOverride}),g=graph.geometry;
@@ -60,14 +70,19 @@ export class NeuralRenderer {
             const b=alloc(data);bindings[key]=b;weights.push(b);
           }
         }
-        this.dispatch(op.entry,bindings,op.scalars,op.count);
-        // Bound submissions and memory. This is a correctness backend, not a fused realtime backend.
-        await runtime.idle();
-        for(const b of weights){runtime.destroyBuffer(b);owned.delete(b);}model.cache.clear();
-        if(capture)for(const id of [op.bindings.output])if(boundaryById.has(id))await capture(boundaryById.get(id),await runtime.read(live.get(id)),graph.resources.get(id));
+        batch??=runtime.batch();
+        this.dispatch(op.entry,bindings,op.scalars,op.count,batch);queuedOps++;
+        for(const b of weights)retire(b);model.cache.clear();
+        // Keep intermediates queue-ordered, and retain resources until submitted work finishes.
+        // Bound both cancellation latency and transient uploads, rather than waiting every op.
+        const boundary=capture&&boundaryById.get(op.bindings.output);
+        if(boundary){await flush();await capture(boundary,await runtime.read(live.get(op.bindings.output)),graph.resources.get(op.bindings.output));}
         for(const [id,b] of live)if(lastUse.get(id)===index){live.delete(id);release(b);}
+        if(queuedOps>=8||retiredBytes>=64*1024*1024)await flush();
         onProgress({index:index+1,total:graph.ops.length,label:op.label});
       }
+      await flush();
+      if(signal?.aborted)throw new DOMException('Inference cancelled','AbortError');
       const head=await runtime.read(live.get(graph.head));let output=null;
       if(proxy) {
         const blend=model.vector(model.tensor(70,0,'blend_scale'),0,1)[0],out=alloc(pixels*16);
@@ -75,7 +90,7 @@ export class NeuralRenderer {
         output=await runtime.read(out);
       }
       return {head,output,geometry:g,dispatches:graph.ops.length};
-    } finally {await runtime.idle().catch(()=>{});for(const b of owned)runtime.destroyBuffer(b);this.model.cache.clear();this.busy=false;}
+    } finally {batch?.discard();await runtime.idle().catch(()=>{});for(const b of owned)runtime.destroyBuffer(b);this.model.cache.clear();this.busy=false;}
   }
   dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.runtime.dispose();}
 }

@@ -10,6 +10,7 @@
     "test:gpu": "node scripts/test-gpu.mjs",
     "test:ui": "node scripts/test-ui.mjs",
     "test:real": "node scripts/test-real-model.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
     "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native.ps1",
     "build:site": "node scripts/build-site.mjs",
     "audit:public": "node scripts/audit-public.mjs",

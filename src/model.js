@@ -4,6 +4,9 @@ export function half(h) {
   return e===0?s*m*2**-24:e===31?(m?NaN:s*Infinity):s*(1+m/1024)*2**(e-15);
 }
 export function e4(b) { const s=b&128?-1:1,e=(b>>>3)&15,m=b&7;return (b&127)===127?0:e===0?s*m/512:s*(1+m/8)*2**(e-7); }
+// Decode each representable value once; large tensors otherwise repeat exponentiation.
+const e4Values=Float32Array.from({length:256},(_,i)=>e4(i));
+const halfValues=Float32Array.from({length:65536},(_,i)=>half(i));
 export function packedIndex(k,n,N) {return (k>>>5)*N*32+(n>>>7)*4096+((n&127)>>>6)*2048+((n&63)>>>4)*512+(((n&7)*4+((k&15)>>>2))*16)+((n&15)>>>3)*8+((k&31)>>>4)*4+(k&3);}
 export function inverseInput(k) {return (k&~31)+(k&17)+((k&2)<<1)+((k&4)<<1)+((k&8)>>>2);}
 export function halfIndex(k,n,N) {return ((k>>>4)*Math.ceil(N/16)+(n>>>4))*256+((n&7)*4+((k&7)>>>1))*8+((n>>>3)&1)*4+((k&15)>=8?2:0)+(k&1);}
@@ -39,7 +42,7 @@ export class Model {
   }
   tensor(block,layer=0,parameter='layer') { const name=`block${block}.layer${layer}.${parameter}`;if(!this.tensors.has(name))throw Error('Missing tensor '+name);return name; }
   bytes(name,offset,length) {const t=this.tensors.get(name);if(!t||offset<0||offset+length>t.length)throw Error('Tensor bounds: '+name);return new DataView(t.buffer,t.byteOffset+offset,length);}
-  vector(name,offset,count,type='half') {const v=this.bytes(name,offset,count*(type==='half'?2:4));return Float32Array.from({length:count},(_,i)=>type==='half'?half(v.getUint16(i*2,true)):v.getFloat32(i*4,true));}
+  vector(name,offset,count,type='half') {const v=this.bytes(name,offset,count*(type==='half'?2:4));return Float32Array.from({length:count},(_,i)=>type==='half'?halfValues[v.getUint16(i*2,true)]:v.getFloat32(i*4,true));}
   matrix(name,offset,K,N,{batches=1,halfMode=false}={}) {
     const key=[name,offset,K,N,batches,halfMode].join('/');if(this.cache.has(key))return this.cache.get(key);
     const out=new Float32Array(batches*K*N),t=this.tensors.get(name);if(!t)throw Error('Missing tensor '+name);
@@ -47,7 +50,7 @@ export class Model {
     for(let batch=0;batch<batches;batch++)for(let k=0;k<K;k++)for(let n=0;n<N;n++) {
       const idx=offset+(halfMode?2*halfIndex(k,n,N):packedIndex(batch*K+inverseInput(k),n,N));
       if(idx+(halfMode?2:1)>t.length)throw Error('Matrix exceeds tensor '+key);
-      out[(batch*K+k)*N+n]=halfMode?half(v.getUint16(idx,true)):e4(t[idx]);
+      out[(batch*K+k)*N+n]=halfMode?halfValues[v.getUint16(idx,true)]:e4Values[t[idx]];
     }
     this.cache.set(key,out);return out;
   }
@@ -56,7 +59,7 @@ export class Model {
     for(let h=0;h<heads;h++)for(let q=0;q<64;q++)for(let k=0;k<64;k++) {
       const x=q%8,y=q>>>3,tq=(y>>>2)*32+(x>>>2)*16+(y&3)*4+(x&3),m=tq&15,n=k&15;
       const index=(tq>>>4)*1024+(k>>>4)*256+(((m&7)<<2)|((n&7)>>>1))*8+(n>>>3)*4+(m>=8?2:0)+(n&1);
-      out[(h*64+q)*64+k]=half(v.getUint16(h*8192+index*2,true));
+      out[(h*64+q)*64+k]=halfValues[v.getUint16(h*8192+index*2,true)];
     }
     return out;
   }

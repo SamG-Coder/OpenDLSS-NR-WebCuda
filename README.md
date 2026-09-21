@@ -10,9 +10,9 @@ All inference and frame-processing kernels are authored in `kernels/*.cu` with s
 
 Implemented: the full 71-block graph (including block 39's transition-only operation), dense and expert FFNs, 512-channel branch FFNs, global ViT attention, shifted windows, encoder/decoder transitions, preprocessing, motion-based history reprojection, temporal composition, model loading with SHA-256 verification, and a native-fixture parity runner.
 
-This is a **scalar correctness backend**, with 653 graph dispatches per frame. It emulates Ada's grouped F13/F24 accumulation, preserves half and FP8 publication points, and keeps decoded activations in f32 buffers. It is not a realtime or memory-optimized implementation. Large resolutions can exceed the device's buffer limit and are rejected before inference.
+This is a **scalar correctness backend**, with 653 graph dispatches per frame. It emulates Ada's grouped F13/F24 accumulation, preserves half and FP8 publication points, and keeps decoded activations in f32 buffers. Scheduling and model decoding are optimized with bounded command batches and lookup tables; the scalar kernels are not realtime. Large resolutions can exceed the device's buffer limit and are rejected before inference.
 
-**Real-model browser inference has passed** with a locally supplied `nvngx_dlssnr.dll` version 310.8.0.0: all 153 tensors loaded, and all 653 dispatches completed for a 33 × 33 image using the native padded field on an RTX 5080 in Edge (about 4.8 seconds). Original-capture parity remains unverified; successful inference does not establish image equivalence to NVIDIA's implementation. Model weights and original captures are not distributed.
+**Real-model browser inference has passed** with a locally supplied `nvngx_dlssnr.dll` version 310.8.0.0: all 153 tensors loaded, and all 653 dispatches completed at source resolution on an RTX 5080 in Edge, including 720p and 1080p. Original-capture parity remains unverified; successful inference does not establish image equivalence to NVIDIA's implementation. Model weights and original captures are not distributed.
 
 The browser workspace accepts images or local GLB/glTF objects. Objects are rendered with Three.js into an sRGB display proxy, then processed by the same CUDA-derived NR network. This is a still-frame workflow with an interactive camera; it does not reproduce the original Filament renderer, its HDR display pipeline, or its custom postprocessing styles. Temporal users supply motion vectors; this project does not generate scene motion vectors.
 
@@ -48,7 +48,7 @@ Choose **Image** or **3D object**, then click **Render with NR**. Images retain 
 
 Preview and NR memory checks are separate. Before model setup, no guessed WebGPU storage-buffer limit is imposed. After setup, the actual NR device limit determines whether inference is available; exceeding it leaves the source preview usable. A 512 × 512 frame requires a 144 MiB intermediate NR buffer and has been verified through preview and real inference on the test GPU. The preview has its own 16-megapixel allocation guard and, for 3D, checks the WebGL texture limit. These limits are distinct from model geometry size and total GPU VRAM.
 
-NR now explicitly requests the adapter's supported storage-buffer and allocation limits instead of WebCuda's conservative 256 MiB default. On the tested RTX 5080 / Edge adapter, this permits buffers up to almost 2 GiB. Real-model renders passed at **1280 × 720** (about 5.7 seconds) and **1920 × 1080** (about 7.2 seconds), with matching source/output dimensions and no rescaling. The reusable temporary-buffer pool is bounded to 256 MiB; larger retired buffers are destroyed after GPU completion. Actual hardware limits still apply.
+NR now explicitly requests the adapter's supported storage-buffer and allocation limits instead of WebCuda's conservative 256 MiB default. On the tested RTX 5080 / Edge adapter, this permits buffers up to almost 2 GiB. Real-model benchmarks complete at **1280 × 720** (median 2.28 seconds) and **1920 × 1080** (median 3.56 seconds), with matching source/output dimensions and no rescaling. The reusable temporary-buffer pool is bounded to 256 MiB; larger retired buffers are destroyed after GPU completion. Actual hardware limits still apply.
 
 For GLB, select the file. For glTF, select the complete folder or the glTF plus its buffers and textures together. The viewer includes orbit/zoom/pan, object framing, three lighting presets, exposure, background colour, field of view, and animation clip/time selection for a still pose. Draco, Meshopt, and KTX2 decoder support is configured locally through Three.js. Browser tests cover ordinary GLB and external-buffer glTF files; compressed-asset decoding has not been separately fixture-tested. All app libraries are served locally after `npm install`; asset loading never fetches a model's missing files from a remote server.
 
@@ -122,6 +122,24 @@ The extracted-folder API remains available as `Model.load(readFile)` from `src/m
 For temporal rendering, pass `history` (previous RGBA output) and `motion` (RGBA floats, xy = current-to-previous UV displacement, z = validity). Without motion, history is assumed already reprojected and its alpha is used as the validity mask. Invalid history falls back to the current proxy. Output is truncated to the half grid like the native compositor.
 
 The deterministic Box–Muller path uses software binary64 for trigonometry and log evaluation through WebCuda. This avoids GPU-dependent WGSL approximation errors seen in testing. Original-driver transcendental parity is still a capture-level question; use recorded `inputFeatures` to isolate network arithmetic from preprocessing.
+
+## Performance
+
+The first scheduling/decoding optimization reduces median 720p inference from **5.49 s to 2.28 s (2.40×)** on the tested RTX 5080 / Edge system. Both full float32 outputs match the previous implementation byte for byte. Resolution, numerical kernels, conditioning, and model weights are unchanged. These are three-run synthetic-gradient measurements of the renderer API, excluding model import, shader setup, and UI image conversion; they are not realtime frame rates or an original-driver parity claim. See [measurement details](https://github.com/SamG-Coder/OpenDLSS-NR-WebCuda/blob/main/reports/performance.md).
+
+Run your own local benchmark with a compatible DLL:
+
+```powershell
+$env:NR_DLL = 'C:\path\to\nvngx_dlssnr.dll'
+$env:NR_BROWSER = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+$env:NR_WIDTH = '1280'
+$env:NR_HEIGHT = '720'
+$env:NR_RUNS = '3'
+npm run build
+npm run benchmark
+```
+
+Results are written to ignored `reports/performance.json`. Set `NR_REPORT` to save another report and `NR_COMPARE` to a baseline report to require matching network-head and final-output SHA-256 hashes. Compare on the same hardware and browser. The benchmark uses a generated gradient and never distributes the DLL or its tensors.
 
 ## WebCuda change
 
