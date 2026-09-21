@@ -1,0 +1,16 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {NeuralRenderer} from '../src/engine.js';
+import {GpuProfile} from '../src/gpu-profile.js';
+
+test('Renderer rejects invalid cache budgets and GEMM modes before requesting a device',async()=>{
+  for(const workspaceCacheBytes of [-1,NaN,Infinity,0.5])await assert.rejects(NeuralRenderer.create({}, {workspaceCacheBytes}),/cache budget/);
+  await assert.rejects(NeuralRenderer.create({}, {gemmMode:'unknown'}),/GEMM mode/);
+});
+
+test('Profiling explicitly reports unsupported timestamps without inventing GPU timings',async()=>{
+  const profile=new GpuProfile({device:{features:new Set()}});
+  assert.equal(profile.batch('test',{}),null);
+  const result=await profile.read();assert.equal(result.supported,false);assert.match(result.reason,/timestamp-query/);assert.equal(result.totalGpuMs,undefined);
+  profile.dispose();
+});

@@ -50,6 +50,21 @@ try {
   const a=runtime.createBuffer(new Float32Array(32).fill(1)),b=runtime.createBuffer(new Float32Array(32*16).fill(0.5)),residual=runtime.createBuffer(new Float32Array(16).fill(2)),scales=runtime.createBuffer(new Float32Array(16).fill(0.5)),raw=runtime.createBuffer(64),out=runtime.createBuffer(64);
   dispatch('nr_gemm',{input:a,weights:b,residual,scales,raw,output:out},{rows:1,K:32,N:16,batches:1,inputStride:32,inputBatchStride:32,partition:0,halfMode:0,silu:0,hasResidual:1,quantize:0},16);
   const gemm=await runtime.read(out);check('FP8 GEMM seeds the residual accumulator',gemm.every(x=>x===17),Array.from(gemm.slice(0,4)).join(','));
+  for(const shape of [{rows:7,K:64,N:19,batches:2,halfMode:0,partition:0},{rows:9,K:64,N:32,batches:2,halfMode:0,partition:32},{rows:5,K:16,N:4,batches:1,halfMode:1,partition:8}]) {
+    const {rows,K,N,batches,halfMode}=shape,count=rows*batches*N,lanes=halfMode?2:4,packed=new Uint32Array(Math.ceil(K*N*batches/lanes));
+    for(let i=0;i<K*N*batches;i++){const code=halfMode?8192+(i*97)%4096+((i%2)*32768):((i*17)%96)+((i%2)*128);packed[Math.floor(i/lanes)]|=code<<((i%lanes)*(halfMode?16:8));}
+    const bindings={input:runtime.createBuffer(Float32Array.from({length:rows*K*batches},(_,i)=>e4((i*7)%64))),weights:runtime.createBuffer(packed),residual:runtime.createBuffer(new Float32Array(count).fill(.5)),scales:runtime.createBuffer(new Float32Array(N*batches).fill(.25)),raw:runtime.createBuffer(new Float32Array(count+17).fill(777)),output:runtime.createBuffer(new Float32Array(count+17).fill(777))};
+    const scalars={...shape,inputStride:K*batches,inputBatchStride:shape.partition?0:K,silu:1,hasResidual:1,quantize:1};
+    try {
+      dispatch('nr_gemm_packed',bindings,scalars,count);
+      const expectedRaw=await runtime.read(bindings.raw,Uint32Array),expected=await runtime.read(bindings.output,Uint32Array);
+      runtime.write(bindings.raw,new Float32Array(count+17).fill(777));runtime.write(bindings.output,new Float32Array(count+17).fill(777));
+      const groups=Math.ceil(rows/4)*batches*Math.ceil(N/16);
+      runtime.batch().dispatch(kernels.nr_gemm_tiled.bind(bindings,scalars),[2,Math.ceil(groups/2),1]).submit();
+      const actualRaw=await runtime.read(bindings.raw,Uint32Array),actual=await runtime.read(bindings.output,Uint32Array);
+      check(`Tiled GEMM matches scalar: tails, 2D dispatch, half=${halfMode}, partition=${shape.partition}`,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===expectedRaw[i]));
+    } finally {for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
+  }
   const z=runtime.createBuffer(new Float32Array(64*96)),prior=runtime.createBuffer(new Float32Array(4096)),scores=runtime.createBuffer(64*64*4),weights=runtime.createBuffer(64*64*4),inverse=runtime.createBuffer(64*4),attended=runtime.createBuffer(64*32*4);
   dispatch('nr_scores',{qkv:z,prior,scores},{width:8,height:8,heads:1,shiftX:4,shiftY:4,padded:64,globalMode:0},4096);
   dispatch('nr_softmax',{scores,weights,inverse},{rows:64,heads:1,keys:64,globalMode:0},64);
@@ -80,7 +95,7 @@ try {
     }
   } else report.nativeFixtures='Not supplied; run scripts/test-native.ps1';
   const synthetic={cache:new Map(),matrix:(name,offset,K,N,{batches=1})=>new Float32Array(K*N*batches),vector:(name,offset,n)=>new Float32Array(n).fill(1),prior:(name,offset,heads)=>new Float32Array(heads*4096)};
-  const engine=new NeuralRenderer(runtime,kernels,synthetic),boundaries=[];
+  const engine=new NeuralRenderer(runtime,kernels,synthetic,{workspaceCacheBytes:0}),boundaries=[];
   const run=await engine.run({width:2,height:2,inputFeatures:new Float32Array(64),geometryOverride:{width:2,height:2,fullWidth:2,fullHeight:2,levels:Array.from({length:6},()=>({width:1,height:1}))},capture:(name,data)=>{if(!data.every(x=>x===0))throw Error('Nonzero synthetic boundary '+name);boundaries.push(name);}});
   check('Complete graph executes all 75 comparable boundaries (synthetic weights, tiny test geometry)',boundaries.length===75&&new Set(boundaries).size===75&&run.head.every(x=>x===0),`${run.dispatches} dispatches, ${boundaries.length} boundaries`);
   const args={width:2,height:2,inputFeatures:new Float32Array(64),geometryOverride:{width:2,height:2,fullWidth:2,fullHeight:2,levels:Array.from({length:6},()=>({width:1,height:1}))}};
@@ -93,12 +108,25 @@ try {
   const restarted=await engine.run(args);
   check('Renderer can restart after cancellation with identical output',restarted.head.every((x,i)=>Object.is(x,run.head[i]))&&runtime.buffers.size===resourcesBefore);
   const persistentModel={...synthetic,packedMatrix:(name,offset,K,N,{batches=1,halfMode})=>new Uint32Array(Math.ceil(K*N*batches/(halfMode?2:4)))};
-  const persistent=new NeuralRenderer(runtime,kernels,persistentModel);
+  const persistent=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:0});
   await persistent.run(args);
   const cacheBytes=persistent.weightCacheBytes,cacheSize=persistent.weightCache.size,uploaded=runtime.stats.dataBytesUploaded;
   const warm=await persistent.run(args);
   check('Packed model persists without weight uploads on repeated renders',cacheBytes>0&&persistent.weightCacheBytes===cacheBytes&&persistent.weightCache.size===cacheSize&&runtime.stats.dataBytesUploaded-uploaded===args.inputFeatures.byteLength+4&&warm.head.every((x,i)=>Object.is(x,run.head[i])));
   persistent.clearWeightCache();
+  const workspaceEngine=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:1024*1024});
+  const firstWorkspace=await workspaceEngine.run(args),secondWorkspace=await workspaceEngine.run({...args,profile:true});
+  check('Persistent workspace reuses allocations within its budget',workspaceEngine.workspaceBytes>0&&workspaceEngine.workspaceBytes<=1024*1024&&secondWorkspace.workingBuffers.created<firstWorkspace.workingBuffers.created&&secondWorkspace.head.every((v,i)=>Object.is(v,firstWorkspace.head[i])));
+  check('GPU profiling reports actual per-dispatch timestamps or explicit unsupported status',secondWorkspace.profile.supported?secondWorkspace.profile.dispatches.length===653&&secondWorkspace.profile.dispatches.every(r=>Number.isFinite(r.gpuMs)&&r.gpuMs>=0):!!secondWorkspace.profile.reason);
+  const resizeArgs={...args,width:3,height:3,inputFeatures:new Float32Array(144),geometryOverride:{...args.geometryOverride,width:3,height:3,fullWidth:3,fullHeight:3}};
+  const resized=await workspaceEngine.run(resizeArgs);
+  check('Workspace resets on resolution changes and produces the correct output shape',resized.head.length===36&&resized.head.every(v=>v===0)&&workspaceEngine.workspaceBytes<=1024*1024);
+  const cancelWorkspace=new AbortController();let workspaceCancelled=false;
+  try{await workspaceEngine.run({...args,signal:cancelWorkspace.signal,onProgress:({index})=>{if(index===3)cancelWorkspace.abort();}});}catch(e){workspaceCancelled=e.name==='AbortError';}
+  const resumedWorkspace=await workspaceEngine.run(args);
+  check('Workspace remains valid after discarding cancelled work',workspaceCancelled&&resumedWorkspace.head.every((v,i)=>Object.is(v,firstWorkspace.head[i])));
+  workspaceEngine.clearWorkspace();workspaceEngine.clearWeightCache();
+  check('Explicit workspace release frees all cached GPU resources',workspaceEngine.workspaceBytes===0&&workspaceEngine.workspace.size===0&&runtime.buffers.size===resourcesBefore);
   check('Clearing packed cache releases all model buffers',persistent.weightCacheBytes===0&&persistent.weightCache.size===0&&runtime.buffers.size===resourcesBefore);
   const cancelPacked=new AbortController();let packedCancelled=false;
   try{await persistent.run({...args,signal:cancelPacked.signal,onProgress:({index})=>{if(index===3)cancelPacked.abort();}});}catch(e){packedCancelled=e.name==='AbortError';}
