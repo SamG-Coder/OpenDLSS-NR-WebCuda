@@ -5,11 +5,11 @@
   "platform": "Windows, NVIDIA Blackwell, Microsoft Edge WebGPU",
   "cudaKernels": 12,
   "hostTests": {
-    "passed": 18,
+    "passed": 22,
     "failed": 0
   },
   "webcudaTests": {
-    "passed": 762,
+    "passed": 765,
     "failed": 0
   },
   "nativeCudaCases": 24,
@@ -93,5 +93,37 @@
       "glTF"
     ],
     "automaticMotionVectors": false
+  },
+  "webcudaRuntimeFixRevision": "0b581fbeee4147b9d3f3a589ee150c19e62483c2",
+  "fullResolutionInference": {
+    "adapterStorageBufferLimit": 2147483644,
+    "reusablePoolLimit": 268435456,
+    "runs": [
+      {
+        "source": [
+          1280,
+          720
+        ],
+        "output": [
+          1280,
+          720
+        ],
+        "renderSeconds": 5.7,
+        "passed": true
+      },
+      {
+        "source": [
+          1920,
+          1080
+        ],
+        "output": [
+          1920,
+          1080
+        ],
+        "renderSeconds": 7.2,
+        "passed": true
+      }
+    ],
+    "downscaled": false
   }
 }

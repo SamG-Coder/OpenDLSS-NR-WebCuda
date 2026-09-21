@@ -1,0 +1,66 @@
+From 0b581fbeee4147b9d3f3a589ee150c19e62483c2 Mon Sep 17 00:00:00 2001
+From: SamG-Coder <13449963+SamG-Coder@users.noreply.github.com>
+Date: Tue, 22 Sep 2026 09:09:06 +1000
+Subject: [PATCH] Allow callers to request adapter-sized storage buffers
+
+---
+ src/runtime/runtime.js               |  5 +++--
+ tests/runtime-buffer-limits.test.mjs | 23 +++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 2 deletions(-)
+ create mode 100644 tests/runtime-buffer-limits.test.mjs
+
+diff --git a/src/runtime/runtime.js b/src/runtime/runtime.js
+index 2da906a..5be2fef 100644
+--- a/src/runtime/runtime.js
++++ b/src/runtime/runtime.js
+@@ -44,6 +44,7 @@ export function validateWorkgroup(metadata, limits) {
+ }
+ export class GpuRuntime {
+   static async create(options = {}) {
++    if(options.useAdapterBufferLimits !== undefined && typeof options.useAdapterBufferLimits !== 'boolean') throw new TypeError('useAdapterBufferLimits must be a boolean.');
+     if (!globalThis.navigator?.gpu && !options.device) throw new Error('WebGPU is required. Open this project on localhost or HTTPS in a WebGPU-capable browser. WebGL cannot run these kernels.');
+     const adapter = options.adapter || (!options.device ? await navigator.gpu.requestAdapter({powerPreference:'high-performance'}) : null);
+     if (!adapter && !options.device) throw new Error('No WebGPU adapter is available. Check the browser GPU settings and graphics driver.');
+@@ -52,8 +53,8 @@ export class GpuRuntime {
+       maxStorageBuffersPerShaderStage: Math.min(adapter.limits.maxStorageBuffersPerShaderStage,16),
+       maxComputeInvocationsPerWorkgroup: Math.min(adapter.limits.maxComputeInvocationsPerWorkgroup, 1024),
+       maxComputeWorkgroupSizeX: Math.min(adapter.limits.maxComputeWorkgroupSizeX,1024),
+-      maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 256 * 1024 * 1024),
+-      maxBufferSize: Math.min(adapter.limits.maxBufferSize, 256 * 1024 * 1024)
++      maxStorageBufferBindingSize: options.useAdapterBufferLimits ? adapter.limits.maxStorageBufferBindingSize : Math.min(adapter.limits.maxStorageBufferBindingSize, 256 * 1024 * 1024),
++      maxBufferSize: options.useAdapterBufferLimits ? adapter.limits.maxBufferSize : Math.min(adapter.limits.maxBufferSize, 256 * 1024 * 1024)
+     } : undefined;
+     const device = options.device || await adapter.requestDevice({requiredFeatures:features, requiredLimits});
+     return new GpuRuntime(device, {...options,adapter,ownsDevice:!options.device});
+diff --git a/tests/runtime-buffer-limits.test.mjs b/tests/runtime-buffer-limits.test.mjs
+new file mode 100644
+index 0000000..fcccf33
+--- /dev/null
++++ b/tests/runtime-buffer-limits.test.mjs
+@@ -0,0 +1,23 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {GpuRuntime} from '../src/runtime/runtime.js';
++
++async function requested(options={},maximum=2147483644){
++ let descriptor;const stop=new Error('Captured request');
++ const adapter={features:new Set(),limits:{maxStorageBuffersPerShaderStage:16,maxComputeInvocationsPerWorkgroup:1024,maxComputeWorkgroupSizeX:1024,maxStorageBufferBindingSize:maximum,maxBufferSize:maximum+4},requestDevice:async d=>{descriptor=d;throw stop;}};
++ // The sentinel stops before creating GPU resources; tests the real request path.
++ const original=Object.getOwnPropertyDescriptor(globalThis,'navigator');
++ Object.defineProperty(globalThis,'navigator',{value:{gpu:{}},configurable:true});
++ try{await assert.rejects(GpuRuntime.create({adapter,...options}),e=>e===stop);return descriptor.requiredLimits;}
++ finally{if(original)Object.defineProperty(globalThis,'navigator',original);else delete globalThis.navigator;}
++}
++test('Runtime retains its conservative buffer request unless explicitly opted in',async()=>{
++ const limits=await requested();assert.equal(limits.maxStorageBufferBindingSize,256*1024*1024);assert.equal(limits.maxBufferSize,256*1024*1024);
++});
++test('Large-buffer opt-in requests actual supported limits, including smaller adapters',async()=>{
++ const limits=await requested({useAdapterBufferLimits:true});assert.equal(limits.maxStorageBufferBindingSize,2147483644);assert.equal(limits.maxBufferSize,2147483648);
++ assert.equal((await requested({useAdapterBufferLimits:true},128*1024*1024)).maxStorageBufferBindingSize,128*1024*1024);
++});
++test('Large-buffer opt-in rejects invalid options',async()=>{
++ await assert.rejects(GpuRuntime.create({useAdapterBufferLimits:'yes'}),/must be a boolean/);
++});
+-- 
+2.55.0.windows.3
+

@@ -2,7 +2,7 @@ import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {createGraph} from './graph.js';
 export class NeuralRenderer {
   static async create(model,options={}) {
-    const runtime=await GpuRuntime.create(options),kernels={};
+    const runtime=await GpuRuntime.create({useAdapterBufferLimits:true,...options}),kernels={};
     try {
       const response=await fetch(new URL('../generated/manifest.json',import.meta.url));if(!response.ok)throw Error('Run npm run build before starting.');
       const manifest=await response.json();
@@ -19,9 +19,10 @@ export class NeuralRenderer {
   async run({width,height,proxy,inputFeatures,history,motion,seed=0,conditioning={},onProgress=()=>{},capture,signal,geometryOverride}={}) {
     if(this.busy)throw Error('An inference is already running.');this.busy=true;
     const runtime=this.runtime,model=this.model,live=new Map(),pool=new Map(),owned=new Set();
+    let poolBytes=0;const poolLimit=256*1024*1024;
     const alloc=data=>{const b=runtime.createBuffer(data);owned.add(b);return b;};
-    const release=b=>{const list=pool.get(b.size)||[];list.push(b);pool.set(b.size,list);};
-    const take=size=>pool.get(size)?.pop()||alloc(size);
+    const release=b=>{if(poolBytes+b.size>poolLimit){runtime.destroyBuffer(b);owned.delete(b);return;}const list=pool.get(b.size)||[];list.push(b);pool.set(b.size,list);poolBytes+=b.size;};
+    const take=size=>{const b=pool.get(size)?.pop();if(b){poolBytes-=b.size;return b;}return alloc(size);};
     try {
       const graph=createGraph(width,height,{geometryOverride}),g=graph.geometry;
       model.validateGraph?.(graph);

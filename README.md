@@ -48,6 +48,8 @@ Choose **Image** or **3D object**, then click **Render with NR**. Images retain 
 
 Preview and NR memory checks are separate. Before model setup, no guessed WebGPU storage-buffer limit is imposed. After setup, the actual NR device limit determines whether inference is available; exceeding it leaves the source preview usable. A 512 × 512 frame requires a 144 MiB intermediate NR buffer and has been verified through preview and real inference on the test GPU. The preview has its own 16-megapixel allocation guard and, for 3D, checks the WebGL texture limit. These limits are distinct from model geometry size and total GPU VRAM.
 
+NR now explicitly requests the adapter's supported storage-buffer and allocation limits instead of WebCuda's conservative 256 MiB default. On the tested RTX 5080 / Edge adapter, this permits buffers up to almost 2 GiB. Real-model renders passed at **1280 × 720** (about 5.7 seconds) and **1920 × 1080** (about 7.2 seconds), with matching source/output dimensions and no rescaling. The reusable temporary-buffer pool is bounded to 256 MiB; larger retired buffers are destroyed after GPU completion. Actual hardware limits still apply.
+
 For GLB, select the file. For glTF, select the complete folder or the glTF plus its buffers and textures together. The viewer includes orbit/zoom/pan, object framing, three lighting presets, exposure, background colour, field of view, and animation clip/time selection for a still pose. Draco, Meshopt, and KTX2 decoder support is configured locally through Three.js. Browser tests cover ordinary GLB and external-buffer glTF files; compressed-asset decoding has not been separately fixture-tested. All app libraries are served locally after `npm install`; asset loading never fetches a model's missing files from a remote server.
 
 The inspector exposes tone, structure, automatic masking, skin structure (follow or custom), style conditioning, and noise seed. Optional temporal inputs accept a previous output image at the exact selected resolution and little-endian float32 RGBA motion vectors (XY=current-to-previous UV displacement, Z=validity). Without motion, history must already be aligned. Image history is an 8-bit convenience path; use the JS API for full float precision. A precomputed feature file can override preprocessing: little-endian float32, 16 lanes per padded pixel, with the required byte length shown in the UI. Invalid sizes and non-finite float data are rejected. Skin overrides require automatic masking. Style is network conditioning, not an extra colour-grading pass.
@@ -72,6 +74,10 @@ npm run test:gpu
 # Optionally exercise the real DLL file picker and full inference:
 $env:NR_DLL = 'C:/path/to/your/nvngx_dlssnr.dll'
 npm run test:ui
+npm run test:real
+# Optional full-resolution regression (requires the same local DLL):
+$env:NR_WIDTH = '1280'
+$env:NR_HEIGHT = '720'
 npm run test:real
 ```
 
@@ -124,6 +130,8 @@ WebCuda is vendored under `vendor/webcuda` so a checkout is self-contained. The 
 `25673c6` — **Support CUDA scalar float/integer bit reinterpretation intrinsics**
 
 It adds `__float_as_uint`, `__uint_as_float`, `__float_as_int`, and `__int_as_float` to the compiler and CPU oracle, with argument validation and regression tests. The patch is in `patches/`. Its full existing test suite passed: **762 tests**. The original development commit is identified here for provenance; its patch is included.
+
+`0b581fb` — **Allow callers to request adapter-sized storage buffers** adds the explicit `useAdapterBufferLimits` runtime option. NR enables it; other WebCuda callers retain their previous defaults. The change is included in the vendored runtime and as patch 0002. The updated WebCuda suite passed **765 tests**.
 
 ## Provenance and license
 
