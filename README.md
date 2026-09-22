@@ -194,3 +194,5 @@ Original work in this project is **Copyright (c) 2026 SamG-Coder**, licensed und
 The workflow runs the public-file audit, host tests, CUDA compilation, and a browser smoke test against the static site at a repository subpath. Pushes to `main` deploy the tested artifact to GitHub Pages; pull requests build and test without deployment. CI does not receive DLLs or weights. Hosted runners do not establish hardware GPU or native-model parity.
 
 `npm run build:site` creates an allowlisted `site/` containing only the browser app, generated kernels, required libraries, and license/attribution files. `npm run test:site` verifies this artifact (install Playwright Chromium first or set `NR_BROWSER`).
+
+The [generated WGSL audit](reports/generated-output-audit.md) separates measured compiler-output experiments from CUDA algorithm/layout differences. `npm run audit:generated` is a local diagnostic requiring your DLL; its shader edits do not modify production artifacts.
