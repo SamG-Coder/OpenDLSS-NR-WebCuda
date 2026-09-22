@@ -1,5 +1,7 @@
 # Wider CUDA execution and cached numerics
 
+This report describes revision `b8db727`. See [the subsequent exponent/vector optimization](performance-fragments.md) for the current kernels and shared-memory requirement.
+
 Measured 2026-09-22 on RTX 5080 / Edge 153.0.4234.48. Both configurations use the same local model, native-half support, CUDA __clz, packed activations, noise cache, and four batches in flight. The baseline disables wideGemm and normalizeAttention; the candidate enables both. Six alternating warm samples per resolution; image preprocessing, network, composition and output readback are timed. Setup and hashing are outside timing.
 
 | Resolution | Previous path | Complete new path | Less time |

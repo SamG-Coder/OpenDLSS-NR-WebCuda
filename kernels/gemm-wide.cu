@@ -3,7 +3,13 @@
 #include "fast-half.cuh"
 #include "packed.cuh"
 #include "activations.cuh"
-// Requires packed FP8 input, bounded weights, N divisible by four, and packed outputs.
+// Every F13 term and partial sum is an integer below the exact f32 limit.
+// Keep four ordered accumulators together without a per-product float/int cast.
+__device__ float4 nr_accumulate4(float4 sum,float4 product,float4 scale){
+  return make_float4(sum.x+truncf(product.x*scale.x),sum.y+truncf(product.y*scale.y),sum.z+truncf(product.z*scale.z),sum.w+truncf(product.w*scale.w));
+}
+// Requires packed FP8 input, bounded weights, four-element-aligned dimensions
+// and input strides, and packed outputs. The build enforces this specialization.
 // Each invocation owns eight outputs across two rows; each row has four consecutive columns and therefore every output word it writes.
 __device__ void nr_wide_store4(unsigned* data, unsigned index, float a, float b, float c, float d, int format) {
   if(format == 1) data[index >> 2u] = nr_e4_code(a) | (nr_e4_code(b) << 8u) | (nr_e4_code(c) << 16u) | (nr_e4_code(d) << 24u);
@@ -45,19 +51,28 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
   float acc7=row+1u<rows && col+3u<N && hasResidual!=0 ? nr_half(nr_activation_load(residual,next+3u,residualFormat)*scales[batch*N+col+3u]):0.0f;
   float total7=0.0f;
   for(unsigned kb=0u;kb<K;kb+=32u){
-    for(unsigned t=tid;t<512u;t+=128u){
-      unsigned ar=rowBase+t/16u,ak=kb+(t%16u)*2u;
+    // Load aligned FP8 words once, then stage paired K values.
+    for(unsigned t=tid;t<256u;t+=128u){
+      unsigned ar=rowBase+t/8u,ak=kb+(t%8u)*4u;
       unsigned ai=ar*inputStride+batch*inputBatchStride+ak;
-      unsigned ac0=ar<rows && ak<K?(input[ai>>2u]>>((ai&3u)*8u))&255u:0u;
-      unsigned ac1=ar<rows && ak+1u<K?(input[(ai+1u)>>2u]>>(((ai+1u)&3u)*8u))&255u:0u;
-      tileA[t]=__floats2half2_rn(metadata[ac0*2u],metadata[ac1*2u]);
-      expA[t]=__floats2half2_rn(metadata[ac0*2u+1u],metadata[ac1*2u+1u]);
-      unsigned bk=kb+(t/32u)*2u,bc=colBase+t%32u;
-      unsigned wi=(batch*K+bk)*N+bc,bi=t%32u*17u+t/32u;
-      unsigned bc0=bk<K && bc<N?(weights[wi>>2u]>>((wi&3u)*8u))&255u:0u;
-      unsigned bc1=bk+1u<K && bc<N?(weights[(wi+N)>>2u]>>(((wi+N)&3u)*8u))&255u:0u;
-      tileB[bi]=__floats2half2_rn(metadata[bc0*2u],metadata[bc1*2u]);
-      expB[bi]=__floats2half2_rn(metadata[bc0*2u+1u],metadata[bc1*2u+1u]);
+      unsigned word=ar<rows && ak<K?input[ai>>2u]:0u;
+      unsigned c0=word&255u,c1=(word>>8u)&255u,c2=(word>>16u)&255u,c3=word>>24u;
+      unsigned a=t*2u;
+      tileA[a]=__floats2half2_rn(metadata[c0*2u],metadata[c1*2u]);
+      tileA[a+1u]=__floats2half2_rn(metadata[c2*2u],metadata[c3*2u]);
+      expA[a]=__floats2half2_rn(metadata[c0*2u+1u],metadata[c1*2u+1u]);
+      expA[a+1u]=__floats2half2_rn(metadata[c2*2u+1u],metadata[c3*2u+1u]);
+    }
+    unsigned bk=kb+(tid/8u)*2u,bc=colBase+(tid%8u)*4u;
+    unsigned wi=(batch*K+bk)*N+bc;
+    unsigned w0=bk<K && bc<N?weights[wi>>2u]:0u;
+    unsigned w1=bk+1u<K && bc<N?weights[(wi+N)>>2u]:0u;
+    #pragma unroll
+    for(unsigned lane=0u;lane<4u;lane+=1u){
+      unsigned c0=(w0>>(lane*8u))&255u,c1=(w1>>(lane*8u))&255u;
+      unsigned b=(tid%8u*4u+lane)*17u+tid/8u;
+      tileB[b]=__floats2half2_rn(metadata[c0*2u],metadata[c1*2u]);
+      expB[b]=__floats2half2_rn(metadata[c0*2u+1u],metadata[c1*2u+1u]);
     }
     __syncthreads();
     // Two ordered native groups share the same staged K slab.
@@ -72,6 +87,7 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
         int e5=acc5!=0.0f?nr_exp(acc5,-14):-21;
         int e6=acc6!=0.0f?nr_exp(acc6,-14):-21;
         int e7=acc7!=0.0f?nr_exp(acc7,-14):-21;
+        #pragma unroll
         for(unsigned j=0u;j<8u;j+=1u){
           unsigned k=part*8u+j;
           __half2 a0=expA[localRow*16u+k];
@@ -97,70 +113,47 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
           float2 ex7=__half22float2(__hadd2(a1,b3));
           e7=max(e7,max((int)ex7.x,(int)ex7.y));
         }
-        int sum0=isfinite(acc0)?(int)truncf(acc0*nr_pow2(13-e0)):0;
-        float scale0=nr_pow2(9-e0);
-        int sum1=isfinite(acc1)?(int)truncf(acc1*nr_pow2(13-e1)):0;
-        float scale1=nr_pow2(9-e1);
-        int sum2=isfinite(acc2)?(int)truncf(acc2*nr_pow2(13-e2)):0;
-        float scale2=nr_pow2(9-e2);
-        int sum3=isfinite(acc3)?(int)truncf(acc3*nr_pow2(13-e3)):0;
-        float scale3=nr_pow2(9-e3);
-        int sum4=isfinite(acc4)?(int)truncf(acc4*nr_pow2(13-e4)):0;
-        float scale4=nr_pow2(9-e4);
-        int sum5=isfinite(acc5)?(int)truncf(acc5*nr_pow2(13-e5)):0;
-        float scale5=nr_pow2(9-e5);
-        int sum6=isfinite(acc6)?(int)truncf(acc6*nr_pow2(13-e6)):0;
-        float scale6=nr_pow2(9-e6);
-        int sum7=isfinite(acc7)?(int)truncf(acc7*nr_pow2(13-e7)):0;
-        float scale7=nr_pow2(9-e7);
+        float4 sums0=make_float4(isfinite(acc0)?truncf(acc0*nr_pow2(13-e0)):0.0f,isfinite(acc1)?truncf(acc1*nr_pow2(13-e1)):0.0f,isfinite(acc2)?truncf(acc2*nr_pow2(13-e2)):0.0f,isfinite(acc3)?truncf(acc3*nr_pow2(13-e3)):0.0f);
+        float4 scales0=make_float4(nr_pow2(9-e0),nr_pow2(9-e1),nr_pow2(9-e2),nr_pow2(9-e3));
+        float4 sums1=make_float4(isfinite(acc4)?truncf(acc4*nr_pow2(13-e4)):0.0f,isfinite(acc5)?truncf(acc5*nr_pow2(13-e5)):0.0f,isfinite(acc6)?truncf(acc6*nr_pow2(13-e6)):0.0f,isfinite(acc7)?truncf(acc7*nr_pow2(13-e7)):0.0f);
+        float4 scales1=make_float4(nr_pow2(9-e4),nr_pow2(9-e5),nr_pow2(9-e6),nr_pow2(9-e7));
+        #pragma unroll
         for(unsigned j=0u;j<8u;j+=1u){
           unsigned k=part*8u+j;
           __half2 a0=tileA[localRow*16u+k];
           __half2 a1=tileA[(localRow+1u)*16u+k];
           __half2 b0=tileB[(tid%8u*4u+0u)*17u+k];
           float2 p0=__half22float2(__hmul2(a0,b0));
-          sum0+=(int)truncf(p0.x*scale0);
-          sum0+=(int)truncf(p0.y*scale0);
           float2 p4=__half22float2(__hmul2(a1,b0));
-          sum4+=(int)truncf(p4.x*scale4);
-          sum4+=(int)truncf(p4.y*scale4);
           __half2 b1=tileB[(tid%8u*4u+1u)*17u+k];
           float2 p1=__half22float2(__hmul2(a0,b1));
-          sum1+=(int)truncf(p1.x*scale1);
-          sum1+=(int)truncf(p1.y*scale1);
           float2 p5=__half22float2(__hmul2(a1,b1));
-          sum5+=(int)truncf(p5.x*scale5);
-          sum5+=(int)truncf(p5.y*scale5);
           __half2 b2=tileB[(tid%8u*4u+2u)*17u+k];
           float2 p2=__half22float2(__hmul2(a0,b2));
-          sum2+=(int)truncf(p2.x*scale2);
-          sum2+=(int)truncf(p2.y*scale2);
           float2 p6=__half22float2(__hmul2(a1,b2));
-          sum6+=(int)truncf(p6.x*scale6);
-          sum6+=(int)truncf(p6.y*scale6);
           __half2 b3=tileB[(tid%8u*4u+3u)*17u+k];
           float2 p3=__half22float2(__hmul2(a0,b3));
-          sum3+=(int)truncf(p3.x*scale3);
-          sum3+=(int)truncf(p3.y*scale3);
           float2 p7=__half22float2(__hmul2(a1,b3));
-          sum7+=(int)truncf(p7.x*scale7);
-          sum7+=(int)truncf(p7.y*scale7);
+          sums0=nr_accumulate4(sums0,make_float4(p0.x,p1.x,p2.x,p3.x),scales0);
+          sums0=nr_accumulate4(sums0,make_float4(p0.y,p1.y,p2.y,p3.y),scales0);
+          sums1=nr_accumulate4(sums1,make_float4(p4.x,p5.x,p6.x,p7.x),scales1);
+          sums1=nr_accumulate4(sums1,make_float4(p4.y,p5.y,p6.y,p7.y),scales1);
         }
-        if(isfinite(acc0))acc0=nr_fast_fixed_half(sum0,e0-13);
+        if(isfinite(acc0))acc0=nr_fast_fixed_half((int)sums0.x,e0-13);
         if(partition!=0u && (kg+16u)%partition==0u){total0=kg<partition?acc0:nr_half(total0+acc0);acc0=0.0f;}
-        if(isfinite(acc1))acc1=nr_fast_fixed_half(sum1,e1-13);
+        if(isfinite(acc1))acc1=nr_fast_fixed_half((int)sums0.y,e1-13);
         if(partition!=0u && (kg+16u)%partition==0u){total1=kg<partition?acc1:nr_half(total1+acc1);acc1=0.0f;}
-        if(isfinite(acc2))acc2=nr_fast_fixed_half(sum2,e2-13);
+        if(isfinite(acc2))acc2=nr_fast_fixed_half((int)sums0.z,e2-13);
         if(partition!=0u && (kg+16u)%partition==0u){total2=kg<partition?acc2:nr_half(total2+acc2);acc2=0.0f;}
-        if(isfinite(acc3))acc3=nr_fast_fixed_half(sum3,e3-13);
+        if(isfinite(acc3))acc3=nr_fast_fixed_half((int)sums0.w,e3-13);
         if(partition!=0u && (kg+16u)%partition==0u){total3=kg<partition?acc3:nr_half(total3+acc3);acc3=0.0f;}
-        if(isfinite(acc4))acc4=nr_fast_fixed_half(sum4,e4-13);
+        if(isfinite(acc4))acc4=nr_fast_fixed_half((int)sums1.x,e4-13);
         if(partition!=0u && (kg+16u)%partition==0u){total4=kg<partition?acc4:nr_half(total4+acc4);acc4=0.0f;}
-        if(isfinite(acc5))acc5=nr_fast_fixed_half(sum5,e5-13);
+        if(isfinite(acc5))acc5=nr_fast_fixed_half((int)sums1.y,e5-13);
         if(partition!=0u && (kg+16u)%partition==0u){total5=kg<partition?acc5:nr_half(total5+acc5);acc5=0.0f;}
-        if(isfinite(acc6))acc6=nr_fast_fixed_half(sum6,e6-13);
+        if(isfinite(acc6))acc6=nr_fast_fixed_half((int)sums1.z,e6-13);
         if(partition!=0u && (kg+16u)%partition==0u){total6=kg<partition?acc6:nr_half(total6+acc6);acc6=0.0f;}
-        if(isfinite(acc7))acc7=nr_fast_fixed_half(sum7,e7-13);
+        if(isfinite(acc7))acc7=nr_fast_fixed_half((int)sums1.w,e7-13);
         if(partition!=0u && (kg+16u)%partition==0u){total7=kg<partition?acc7:nr_half(total7+acc7);acc7=0.0f;}
       }
     }

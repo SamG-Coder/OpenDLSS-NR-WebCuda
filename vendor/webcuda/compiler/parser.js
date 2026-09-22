@@ -55,7 +55,7 @@ export function tokenize(source, defines = {}) {
       }
       if(/^#\s*(elif)\b/.test(directive))throw new CompileError('Unsupported conditional directive; preprocess it first.',token,source);
       if(!enabled){advance(directive);continue;}
-      if(/^#\s*pragma\s+unroll(?:\s+[1-9]\d*)?\s*(?:\/\/.*)?$/.test(directive.trimEnd())){advance(directive);continue;}
+      const unroll=directive.trimEnd().match(/^#\s*pragma\s+unroll(?:\s+([1-9]\d*))?\s*(?:\/\/.*)?$/);if(unroll){tokens.push({...token,kind:'pragma-unroll',value:'#pragma unroll',factor:unroll[1]?Number(unroll[1]):true});advance(directive);continue;}
       const alias=directive.trimEnd().match(/^#\s*define\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:\/\/.*)?$/);
       const definedName=directive.match(/^#\s*define\s+([A-Za-z_]\w*)/)?.[1];if(definedName&&aliases.has(definedName))throw new CompileError('Macro redefinition is unsupported.',token,source);
       if(alias){if(macros.has(alias[1])){advance(directive);continue;}if(forwarders.has(alias[1])||expressions.has(alias[1])||objectExpressions.has(alias[1])||aliases.size>=128)throw new CompileError('Duplicate or excessive identifier macro alias.',token,source);aliases.set(alias[1],alias[2]);advance(directive);continue;}
@@ -379,6 +379,7 @@ export class Parser {
   }
   statement() {
     const token = this.peek();
+    if(token.kind==='pragma-unroll'){this.take();const loop=this.statement();if(!['for','while','do'].includes(loop.kind))this.fail('#pragma unroll must precede a loop.',token);loop.unroll=token.factor;return loop;}
     if(this.match('asm')||this.match('__asm__')){
       this.match('volatile');this.take('(');let instruction='';while(this.peek().kind==='string')instruction+=this.take().value.slice(1,-1);
       if(!/^\s*vabsdiff4\.u32\.u32\.u32\.add\s+%0\s*,\s*%1\s*,\s*%2\s*,\s*%3\s*;\s*$/.test(instruction))this.fail('Inline PTX supports only vabsdiff4.u32.u32.u32.add with four positional registers.',token);

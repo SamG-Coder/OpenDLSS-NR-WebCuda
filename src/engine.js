@@ -27,7 +27,7 @@ export class NeuralRenderer {
       const manifest=await response.json();
       for(const [entry,file] of Object.entries(manifest)) {
         if(entry==='nr_lookup_tables'&&!wideGemm)continue;
-        if(entry==='nr_local_attention_normalized'&&(!normalizeAttention||!runtime.device.features.has('shader-f16')||runtime.device.limits.maxComputeWorkgroupStorageSize<21248||runtime.device.limits.maxComputeInvocationsPerWorkgroup<512||runtime.device.limits.maxComputeWorkgroupSizeX<512||activationStorage!=='packed'||attentionMode!=='fused'))continue;
+        if(entry==='nr_local_attention_normalized'&&(!normalizeAttention||!runtime.device.features.has('shader-f16')||runtime.device.limits.maxComputeWorkgroupStorageSize<31680||runtime.device.limits.maxComputeInvocationsPerWorkgroup<512||runtime.device.limits.maxComputeWorkgroupSizeX<512||activationStorage!=='packed'||attentionMode!=='fused'))continue;
         if(entry.endsWith('_wide_half')&&!wideGemm)continue;
         if(entry.endsWith('_half')&&(!nativeHalf||!runtime.device.features.has('shader-f16')))continue;
         if(/_compact_s[0-9]/.test(entry)&&(!specializeGemm||activationStorage!=='packed'||!['auto','tile8x8','tile8x16'].includes(gemmMode)))continue;

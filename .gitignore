@@ -20,6 +20,7 @@ scripts/render-portrait.mjs
 *.pth
 reports/*.json
 reports/*.txt
+reports/*-generated/
 !reports/validation-summary.json
 !reports/gpu-verified.json
 vendor/webcuda/*

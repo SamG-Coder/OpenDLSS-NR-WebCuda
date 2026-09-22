@@ -81,7 +81,7 @@ export async function build() {
       const halfName=name+'_half',halfSource=specializeGemmSource(compactKernel(halfCuda,baseEntry,activationHeader),entry,halfName,scalars);
       const halfArtifact=compile(halfSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:halfName,workgroupSize:base.metadata.workgroupSize});
       await writeFile('generated/'+halfName+'.cu',halfSource);await writeFile('generated/'+halfName+'.json',JSON.stringify(serializableArtifact(halfArtifact)));manifest[halfName]=halfName+'.json';
-      if(scalars.N%4===0&&[1,2].includes(scalars.outputFormat)&&(!scalars.rawEnabled||scalars.rawFormat===2)){
+      if([scalars.K,scalars.N,scalars.inputStride,scalars.inputBatchStride].every(n=>n%4===0)&&[1,2].includes(scalars.outputFormat)&&(!scalars.rawEnabled||scalars.rawFormat===2)){
         const wideCuda=header+'\n'+wideTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
         const wideName=name+'_wide_half',wideSource=specializeGemmSource(wideCuda,'nr_gemm_wide',wideName,scalars);
         const wideArtifact=compile(wideSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:wideName,workgroupSize:[128,1,1]});

@@ -70,6 +70,7 @@ test('Fused normalization skips devices below its shared-memory requirement',asy
  globalThis.fetch=async url=>({ok:true,json:async()=>String(url).endsWith('/manifest.json')?{nr_local_attention_normalized:'nr_local_attention_normalized.json'}:{entry:String(url).split('/').pop().replace('.json','')}});
  try{
   await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,[]);
+  device.limits.maxComputeWorkgroupStorageSize=31679;await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,[]);
   device.limits.maxComputeWorkgroupStorageSize=32768;
   await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,['nr_local_attention_normalized']);loaded.length=0;
   device.limits.maxComputeInvocationsPerWorkgroup=256;await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,[]);device.limits.maxComputeInvocationsPerWorkgroup=512;

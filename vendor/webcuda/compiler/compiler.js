@@ -1,3 +1,5 @@
+import {vectorConstructor} from './vector-constructor.js';
+import {unrollCount} from './loop-unroll.js';
 import {trimWgslDependencies} from './wgsl-dependencies.js';
 import {specializeDependencies} from './specialize-dependencies.js';
 import {cloneAst} from './clone-ast.js';
@@ -784,6 +786,7 @@ class Emitter {
     if(['make_uchar2','make_uchar4'].includes(name)){const count=name==='make_uchar2'?2:4;if(args.length!==count||args.some(a=>!numeric(a.type)&&a.type!=='bool'))this.fail('Packed byte constructor requires '+count+' scalar components.',n);const components=args.map((a,i)=>{const value=a.type==='f32'?`u32(i32(${a.code}))`:this.convert(a.code,a.type,'u32',n);return `((${value} & 255u) << ${i*8}u)`;});return this.result(n,count===2?'cw_uchar2':'cw_uchar4',`(${components.join(' | ')})`,pre);}
     if (casts[name]) { if (args.length !== 1) this.fail('Scalar casts require one argument.', n); return this.result(n, casts[name], this.convert(args[0].code, args[0].type, casts[name], n), pre); }
     if (/^make_(float|uint|int)[234]$/.test(name)) {
+      if(/^make_float[234]$/.test(name)&&args.length===Number(name.at(-1))){const vector=vectorConstructor(this,n.args);if(vector!==null)return this.result(n,`vec${args.length}<f32>`,vector,pre);}
       if(name==='make_float3'&&args.length===1&&args[0].type==='vec4<f32>')return this.result(n,'vec3<f32>',`${args[0].code}.xyz`,pre);
       if(name==='make_float4'&&args.length===2&&args[0].type==='vec3<f32>'&&args[1].type==='f32')return this.result(n,'vec4<f32>',`vec4<f32>(${args[0].code}, ${args[1].code})`,pre);
       const count = Number(name.at(-1)); if (args.length !== count && args.length !== 1) this.fail(`${name} needs ${count} arguments.`, n);
@@ -1087,6 +1090,8 @@ class Emitter {
         const condition = n.condition ? this.expr(n.condition) : {code: 'true', type: 'bool', pre: []};
         const inner = this.body(n.body), step = n.kind === 'for' && n.step ? this.effect(n.step) : [];
         this.loopDepth--; this.scopes.pop();
+        const copies=unrollCount(n);
+        if(copies!==null)return ['{',...indent(init),...Array.from({length:copies},()=>['  {',...indent(indent(inner)),'  }',...indent(step)]).flat(),'}'];
         return ['{', ...indent(init),...(n.provenTileVoteLoop?['  _ = subgroupBallot(true);','  @diagnostic(off, subgroup_uniformity)']:[]), '  loop {', ...indent(indent([...condition.pre, `if (!${this.convert(condition.code, condition.type, 'bool', n)}) { break; }`, ...inner, ...(step.length ? ['continuing {', ...indent(step), '}'] : [])])), '  }', '}'];
       }
       case 'return': {
