@@ -1,6 +1,6 @@
 import {geometry,layout,phases,align} from './geometry.js';
 // Host scheduling only. Every numerical operation is compiled from kernels/*.cu.
-export function createGraph(width,height,{geometryOverride,activationStorage='float'}={}) {
+export function createGraph(width,height,{geometryOverride,activationStorage='float',fuseLocalAttention=false}={}) {
   const g=geometryOverride||geometry(width,height),ops=[],resources=new Map();let serial=0;
   const phasesUsed=Array(7).fill(0),boundaries={};
   function resource(rows,channels,label) {const id=`${label}:${serial++}`;resources.set(id,{rows,channels,bytes:rows*channels*4});return id;}
@@ -91,6 +91,13 @@ export function createGraph(width,height,{geometryOverride,activationStorage='fl
   const last=block(merged.out,70,32,g.fullWidth,g.fullHeight,6,post,merged.raw);
   const head=gemm(last.raw,tensor(70),post.head,32,4,{halfMode:1,quantize:0,label:'head'}).out;
   delete boundaries['block-70'];
+  if(fuseLocalAttention)for(let i=0;i<ops.length;i++) {
+    const op=ops[i];
+    if(op.entry!=='nr_scores'||op.scalars.globalMode)continue;
+    const softmax=ops[i+1],attend=ops[i+2];
+    for(const id of [op.bindings.scores,softmax.bindings.weights,softmax.bindings.inverse])resources.delete(id);
+    ops.splice(i,3,{entry:'nr_local_attention',bindings:{qkv:op.bindings.qkv,prior:op.bindings.prior,output:attend.bindings.output},scalars:Object.fromEntries(Object.entries(op.scalars).filter(([key])=>key!=='padded'&&key!=='globalMode')),count:attend.count,label:'local-attention'});
+  }
   if(!['float','packed'].includes(activationStorage))throw Error('Invalid activation storage mode.');
   for(const r of resources.values())r.format=0;
   if(activationStorage==='packed') {

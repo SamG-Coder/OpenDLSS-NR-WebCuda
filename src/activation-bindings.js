@@ -1,4 +1,5 @@
 export const activationBindings={
+  nr_local_attention:['qkv','output'],
   nr_publish:['input','output'],nr_pool:['input','output'],nr_merge:['low','skip','raw','output'],nr_compose:['head'],
   nr_gemm:['input','residual','raw','output'],nr_gemm_packed:['input','residual','raw','output'],
   nr_gemm_tiled:['input','residual','raw','output'],nr_gemm_tile8x8:['input','residual','raw','output'],nr_gemm_tile8x16:['input','residual','raw','output'],

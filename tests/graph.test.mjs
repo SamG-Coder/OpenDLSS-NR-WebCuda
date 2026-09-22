@@ -58,3 +58,14 @@ test('Model loader rejects missing stages, incorrect hashes and short slices',as
 test('Scalar model decoding preserves signed zero and E4 maximum',()=>{
   assert.ok(Object.is(half(32768),-0));assert.ok(Object.is(e4(128),-0));assert.equal(e4(126),448);assert.equal(e4(127),0);
 });
+
+
+test('Local fusion removes only local temporaries and retains global attention and boundaries',()=>{
+  const reference=createGraph(1280,720,{activationStorage:'packed'}),fused=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true});
+  assert.equal(fused.ops.length,529);
+  assert.equal(fused.ops.filter(op=>op.entry==='nr_local_attention').length,62);
+  assert.equal(fused.ops.filter(op=>op.entry==='nr_scores').length,8);
+  assert(fused.ops.filter(op=>op.entry==='nr_scores').every(op=>op.scalars.globalMode===1));
+  assert.deepEqual(fused.boundaries,reference.boundaries);
+  assert.equal(reference.resources.size-fused.resources.size,62*3);
+});

@@ -9,6 +9,7 @@ export function gemmKernel({rows,K,N,halfMode},mode='auto') {
 }
 
 export function dispatchGroups(entry,s,count) {
+  if(entry==='nr_local_attention')return s.heads*Math.ceil((s.width+s.shiftX)/8)*Math.ceil((s.height+s.shiftY)/8)*8;
   const tile={nr_gemm_tiled:[4,16],nr_gemm_tile8x8:[8,8],nr_gemm_tile8x16:[8,16]}[entry];
   if(tile)return Math.ceil(s.rows/tile[0])*s.batches*Math.ceil(s.N/tile[1]);
   if(entry==='nr_scores_tiled'||entry==='nr_attend_tiled'){

@@ -227,3 +227,106 @@ __global__ void nr_attend_tiled(const float* qkv, const float* weights, const fl
     output[((unsigned)row * heads + head) * 32u + channel] = nr_quant(acc);
   }
 }
+
+// Eight queries share an entire local window. Scores and quantized probabilities
+// remain in workgroup memory; the key tile is reused for values after softmax.
+__global__ void nr_local_attention(const float* qkv, const float* prior, float* output, unsigned width, unsigned height, unsigned heads, unsigned shiftX, unsigned shiftY) {
+  __shared__ float queries[256];
+  __shared__ float tileData[2112];
+  __shared__ float probabilities[520];
+  unsigned tid = threadIdx.x;
+  unsigned tile = blockIdx.x + blockIdx.y * gridDim.x;
+  unsigned queryBase = tile % 8u * 8u;
+  unsigned head = tile / 8u % heads;
+  unsigned window = tile / 8u / heads;
+  unsigned windows = ((width + shiftX + 7u) / 8u) * ((height + shiftY + 7u) / 8u);
+  if (window >= windows) return;
+  for (unsigned t = tid; t < 256u; t += 128u) {
+    int row = nr_window_row(queryBase + t / 32u, window, width, height, shiftX, shiftY);
+    queries[t] = row < 0 ? 0.0f : qkv[((unsigned)row * heads + head) * 96u + t % 32u];
+  }
+  for (unsigned t = tid; t < 2048u; t += 128u) {
+    int row = nr_window_row(nr_physical_to_natural(t / 32u), window, width, height, shiftX, shiftY);
+    tileData[(t / 32u) * 33u + t % 32u] = row < 0 ? 0.0f : qkv[((unsigned)row * heads + head) * 96u + 32u + t % 32u];
+  }
+  __syncthreads();
+  unsigned query = tid / 16u;
+  for (unsigned keyBase = 0u; keyBase < 64u; keyBase += 16u) {
+    unsigned key = keyBase + tid % 16u;
+    float acc = prior[(head * 64u + queryBase + query) * 64u + key];
+    for (unsigned kb = 0u; kb < 32u; kb += 16u) {
+      int e = acc != 0.0f ? nr_exp(acc, -14) : -21;
+      for (unsigned c = 0u; c < 16u; c += 1u) {
+        float a = queries[query * 32u + kb + c];
+        float b = tileData[key * 33u + kb + c];
+        if (a != 0.0f && b != 0.0f) e = max(e, nr_exp(a, -6) + nr_exp(b, -6));
+      }
+      int sum = (int)truncf(acc * nr_pow2(13 - e));
+      for (unsigned c = 0u; c < 16u; c += 1u) sum += (int)truncf(queries[query * 32u + kb + c] * tileData[key * 33u + kb + c] * nr_pow2(13 - e));
+      acc = nr_fixed_half(sum, e - 13);
+    }
+    probabilities[query * 65u + key] = nr_exp_weight(acc, 0);
+  }
+  __syncthreads();
+  // Parallelize each query's eight partial sums without changing reduction order.
+  if (tid < 64u) {
+    unsigned q = tid / 8u;
+    unsigned g = tid % 8u;
+    float sum = 0.0f;
+    for (unsigned j = 0u; j < 4u; j += 1u) {
+      unsigned k = q * 65u + g + j * 16u;
+      float pair = nr_half(probabilities[k] + probabilities[k + 8u]);
+      sum = j == 0u ? pair : nr_half(sum + pair);
+    }
+    queries[tid] = sum;
+  }
+  __syncthreads();
+  if (tid < 8u) {
+    unsigned t = tid * 8u;
+    float even = nr_half(nr_half(nr_half(queries[t] + queries[t + 2u]) + queries[t + 4u]) + queries[t + 6u]);
+    float odd = nr_half(nr_half(nr_half(queries[t + 1u] + queries[t + 3u]) + queries[t + 5u]) + queries[t + 7u]);
+    float total = nr_half(0.0f + nr_half(even + odd));
+    queries[128u + tid] = nr_half(1.0f / total);
+  }
+  __syncthreads();
+  for (unsigned k = tid % 16u; k < 64u; k += 16u) probabilities[query * 65u + k] = nr_quant(nr_half(probabilities[query * 65u + k] * queries[128u + query]));
+  for (unsigned t = tid; t < 2048u; t += 128u) {
+    int row = nr_window_row(nr_physical_to_natural(t / 32u), window, width, height, shiftX, shiftY);
+    tileData[(t / 32u) * 33u + t % 32u] = row < 0 ? 0.0f : qkv[((unsigned)row * heads + head) * 96u + 64u + t % 32u];
+  }
+  __syncthreads();
+  int row = nr_window_row(queryBase + query, window, width, height, shiftX, shiftY);
+  for (unsigned channelBase = 0u; channelBase < 32u; channelBase += 16u) {
+    unsigned channel = channelBase + tid % 16u;
+    float acc = 0.0f;
+    for (unsigned kb = 0u; kb < 64u; kb += 16u) {
+      int e = acc != 0.0f ? nr_exp(acc, -14) : -21;
+      for (unsigned j = 0u; j < 16u; j += 1u) {
+        float a = probabilities[query * 65u + kb + j];
+        float b = tileData[(kb + j) * 33u + channel];
+        if (a != 0.0f && b != 0.0f) e = max(e, nr_exp(a, -6) + nr_exp(b, -6));
+      }
+      if (isfinite(acc)) {
+        int sum = (int)truncf(acc * nr_pow2(13 - e));
+        for (unsigned j = 0u; j < 16u; j += 1u) sum += (int)truncf(probabilities[query * 65u + kb + j] * tileData[(kb + j) * 33u + channel] * nr_pow2(13 - e));
+        acc = nr_fixed_half(sum, e - 13);
+      }
+    }
+    queries[query * 32u + channel] = nr_quant(acc);
+  }
+  __syncthreads();
+  // A lane owns four consecutive channels, allowing one packed-word store.
+  if (tid < 64u) {
+    unsigned channel = tid % 8u * 4u;
+    unsigned q = tid / 8u;
+    int target = nr_window_row(queryBase + q, window, width, height, shiftX, shiftY);
+    if (target >= 0) {
+      unsigned base = ((unsigned)target * heads + head) * 32u + channel;
+      unsigned source = q * 32u + channel;
+      output[base] = queries[source];
+      output[base + 1u] = queries[source + 1u];
+      output[base + 2u] = queries[source + 2u];
+      output[base + 3u] = queries[source + 3u];
+    }
+  }
+}

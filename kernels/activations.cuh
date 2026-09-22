@@ -19,3 +19,16 @@ __device__ void nr_activation_store(unsigned* data, unsigned index, float value,
     old = observed;
   }
 }
+
+// Four aligned lanes have a single owner; no compare/exchange retries are needed.
+__device__ void nr_activation_store4(unsigned* data, unsigned index, float a, float b, float c, float d, int format) {
+  if (format == 1) {
+    unsigned word = nr_e4_code(a) | (nr_e4_code(b) << 8u) | (nr_e4_code(c) << 16u) | (nr_e4_code(d) << 24u);
+    atomicExch(&data[index >> 2u], word);
+  } else {
+    nr_activation_store(data, index, a, format);
+    nr_activation_store(data, index + 1u, b, format);
+    nr_activation_store(data, index + 2u, c, format);
+    nr_activation_store(data, index + 3u, d, format);
+  }
+}

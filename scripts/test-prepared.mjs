@@ -12,7 +12,7 @@ try {
   const results=await page.evaluate(async()=>{
     const {modelFromDll}=await import('/src/dll-model.js'),{NeuralRenderer}=await import('/src/engine.js'),{geometry}=await import('/src/geometry.js');
     const model=await modelFromDll(document.querySelector('#local-model').files[0]);
-    const reference=await NeuralRenderer.create(model,{activationStorage:'float',executionMode:'streamed'}),prepared=await NeuralRenderer.create(model);
+    const reference=await NeuralRenderer.create(model,{activationStorage:'float',executionMode:'streamed',attentionMode:'tiled'}),prepared=await NeuralRenderer.create(model);
     const width=97,height=65,proxy=Float32Array.from({length:width*height*4},(_,i)=>i%4===3?1:(i%251)/251),history=proxy.slice(),motion=new Float32Array(proxy.length),g=geometry(width,height);
     for(let i=0;i<motion.length;i+=4){motion[i]=1/width;motion[i+1]=-1/height;motion[i+2]=i%8?1:0;}
     const inputFeatures=Float32Array.from({length:g.fullWidth*g.fullHeight*16},(_,i)=>(i%31-15)/16),results=[];

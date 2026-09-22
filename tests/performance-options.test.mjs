@@ -7,6 +7,7 @@ test('Renderer rejects invalid cache budgets and GEMM modes before requesting a 
   for(const workspaceCacheBytes of [-1,NaN,Infinity,0.5])await assert.rejects(NeuralRenderer.create({}, {workspaceCacheBytes}),/cache budget/);
   await assert.rejects(NeuralRenderer.create({}, {gemmMode:'unknown'}),/GEMM mode/);
   await assert.rejects(NeuralRenderer.create({}, {attentionMode:'unknown'}),/attention mode/);
+  for(const graphBatchSize of [0,65,NaN,1.5])await assert.rejects(NeuralRenderer.create({}, {graphBatchSize}),/batch size/);
   await assert.rejects(NeuralRenderer.create({}, {activationStorage:'unknown'}),/activation storage/);
   await assert.rejects(NeuralRenderer.create({}, {executionMode:'unknown'}),/execution plan/);
   for(const planCacheBytes of [-1,NaN,Infinity,0.5])await assert.rejects(NeuralRenderer.create({}, {planCacheBytes}),/execution plan/);

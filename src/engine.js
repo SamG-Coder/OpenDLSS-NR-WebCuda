@@ -7,10 +7,11 @@ import {GpuProfile} from './gpu-profile.js';
 import {gemmKernel,dispatchGroups} from './kernel-selection.js';
 export class NeuralRenderer {
   static async create(model,options={}) {
-    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='tiled',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,...runtimeOptions}=options;
+    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,...runtimeOptions}=options;
+    if(!Number.isInteger(graphBatchSize)||graphBatchSize<1||graphBatchSize>64)throw Error('Graph batch size must be 1 through 64.');
     if(!Number.isSafeInteger(workspaceCacheBytes)||workspaceCacheBytes<0)throw Error('Invalid workspace cache budget.');
     if(!['auto','tiled','scalar','tile8x8','tile8x16'].includes(gemmMode))throw Error('Invalid GEMM mode.');
-    if(!['tiled','scalar'].includes(attentionMode))throw Error('Invalid attention mode.');
+    if(!['fused','tiled','scalar'].includes(attentionMode))throw Error('Invalid attention mode.');
     if(!['prepared','streamed'].includes(executionMode)||!Number.isSafeInteger(planCacheBytes)||planCacheBytes<0)throw Error('Invalid execution plan options.');
     if(!['float','packed'].includes(activationStorage))throw Error('Invalid activation storage mode.');
     const runtime=await GpuRuntime.create({useAdapterBufferLimits:true,...runtimeOptions}),kernels={};
@@ -18,10 +19,10 @@ export class NeuralRenderer {
       const response=await fetch(new URL('../generated/manifest.json',import.meta.url));if(!response.ok)throw Error('Run npm run build before starting.');
       const manifest=await response.json();
       for(const [entry,file] of Object.entries(manifest)) {const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
-      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes});
+      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize});
     } catch(e) {runtime.dispose();throw e;}
   }
-  constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='tiled',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;this.attentionMode=attentionMode;this.activationStorage=activationStorage;this.executionMode=executionMode;this.planLimit=planCacheBytes;this.plan=null;this.graphCache=null;}
+  constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;this.attentionMode=attentionMode;this.activationStorage=activationStorage;this.executionMode=executionMode;this.planLimit=planCacheBytes;this.graphBatchSize=graphBatchSize;this.plan=null;this.graphCache=null;}
   clearWeightCache() {
     if(this.busy)throw Error('Cancel and await inference before clearing weights.');
     this.#releasePlan();
@@ -42,7 +43,7 @@ export class NeuralRenderer {
     this.workspace.clear();this.workspaceBytes=0;
   }
   dispatch(entry,bindings,scalars,count,batch,formats,planIndex) {
-    if(this.attentionMode==='tiled'&&(entry==='nr_scores'||entry==='nr_attend'))entry+='_tiled';
+    if(this.attentionMode!=='scalar'&&(entry==='nr_scores'||entry==='nr_attend'))entry+='_tiled';
     const groups=dispatchGroups(entry,scalars,count),limit=this.runtime.device.limits.maxComputeWorkgroupsPerDimension;
     if(groups>limit*limit)throw Error(`${entry}: dispatch exceeds device limits.`);
     if(formats&&activationBindings[entry]){scalars={...scalars,...Object.fromEntries(activationBindings[entry].map(b=>[b+'Format',formats[b]??0]))};entry+='_compact';}
@@ -87,7 +88,7 @@ export class NeuralRenderer {
     try {
       this.profile=profile?new GpuProfile(this.runtime):null;
       const graphKey=JSON.stringify([width,height,geometryOverride,this.activationStorage,this.gemmMode,this.attentionMode]);
-      if(this.graphCache?.key!==graphKey)this.graphCache={key:graphKey,graph:createGraph(width,height,{geometryOverride,activationStorage:this.activationStorage})};
+      if(this.graphCache?.key!==graphKey)this.graphCache={key:graphKey,graph:createGraph(width,height,{geometryOverride,activationStorage:this.activationStorage,fuseLocalAttention:this.attentionMode==='fused'})};
       const graph=this.graphCache.graph,g=graph.geometry;
       const workspaceKey=graphKey;
       if(this.workspaceKey!==workspaceKey){this.#releaseWorkspace();poolBytes=0;this.workspaceKey=workspaceKey;}
@@ -146,7 +147,7 @@ export class NeuralRenderer {
         const boundary=capture&&boundaryById.get(op.bindings.output);
         if(boundary){await flush();await capture(boundary,await this.readActivation(live.get(op.bindings.output),graph.resources.get(op.bindings.output)),graph.resources.get(op.bindings.output));}
         for(const [id,b] of live)if(lastUse.get(id)===index){live.delete(id);if(!plan)release(b);}
-        if(queuedOps>=8||retiredBytes>=64*1024*1024)await flush();
+        if(queuedOps>=(plan?this.graphBatchSize:8)||retiredBytes>=64*1024*1024)await flush();
         onProgress({index:index+1,total:graph.ops.length,label:op.label});
       }
       await flush();

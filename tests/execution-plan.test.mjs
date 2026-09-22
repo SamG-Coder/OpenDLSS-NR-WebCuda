@@ -4,8 +4,8 @@ import {createGraph} from '../src/graph.js';
 import {planLayout,createExecutionPlan} from '../src/execution-plan.js';
 
 test('Prepared slots cover every tensor without overlapping lifetimes or bindings',()=>{
-  for(const activationStorage of ['float','packed'])for(const [w,h] of [[128,96],[1280,720],[1920,1080]]) {
-    const graph=createGraph(w,h,{activationStorage}),layout=planLayout(graph);
+  for(const fuseLocalAttention of [false,true])for(const activationStorage of ['float','packed'])for(const [w,h] of [[128,96],[1280,720],[1920,1080]]) {
+    const graph=createGraph(w,h,{activationStorage,fuseLocalAttention}),layout=planLayout(graph);
     assert.equal(layout.assignments.size,graph.resources.size);
     for(const slot of layout.slots)for(const a of slot.ranges) {
       assert(slot.bytes>=graph.resources.get(a.id).bytes);

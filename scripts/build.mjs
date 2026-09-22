@@ -20,11 +20,12 @@ export async function build() {
     await writeFile(`generated/${family}.cu`,source);
     for (const match of source.matchAll(/__global__ void (\w+)/g)) {
       const entry = match[1];
-      const artifact = compile(source,{entry,workgroupSize:[64,1,1]});
+      const workgroupSize=[entry==='nr_local_attention'?128:64,1,1];
+      const artifact = compile(source,{entry,workgroupSize});
       await writeFile(`generated/${entry}.json`,JSON.stringify(serializableArtifact(artifact)));
       await writeFile(`generated/${entry}.wgsl`,artifact.wgsl);
       manifest[entry] = `${entry}.json`;
-      await compact(source,entry,[64,1,1]);
+      await compact(source,entry,workgroupSize);
       console.log(`${entry}: ${artifact.wgsl.length} bytes WGSL`);
     }
   }

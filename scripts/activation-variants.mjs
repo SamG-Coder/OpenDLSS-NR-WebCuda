@@ -3,6 +3,7 @@
 import {activationBindings} from '../src/activation-bindings.js';
 function closing(source,start,open,close){let depth=1;for(let i=start+1;i<source.length;i++){if(source[i]===open)depth++;if(source[i]===close&&!--depth)return i;}throw Error('Unbalanced CUDA source');}
 export function compactKernel(source,entry,helper){
+  source=source.replace(/\r\n?/g,'\n');
   const bindings=activationBindings[entry];if(!bindings)return null;
   const name=entry.startsWith('nr_gemm_tile')?'NR_TILE_ENTRY':entry;
   const start=source.indexOf('__global__ void '+name+'(');if(start<0)throw Error('Missing CUDA entry '+entry);
@@ -19,6 +20,11 @@ export function compactKernel(source,entry,helper){
       re.lastIndex=cursor;
     }
     body=result+body.slice(cursor);
+  }
+  if(entry==='nr_local_attention') {
+    const stores=[0,1,2,3].map(i=>`nr_activation_store(output, base${i?' + '+i+'u':''}, queries[source${i?' + '+i+'u':''}], outputFormat);`).join('\n      ');
+    if(!body.includes(stores))throw Error('Fused attention packed-store template changed');
+    body=body.replace(stores,'nr_activation_store4(output, base, queries[source], queries[source + 1u], queries[source + 2u], queries[source + 3u], outputFormat);');
   }
   return source+'\n'+helper+'\n'+signature+bindings.map(b=>', int '+b+'Format').join('')+(bindings.includes('raw')?', int rawEnabled':'')+') '+body+'\n';
 }
