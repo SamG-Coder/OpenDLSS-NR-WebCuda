@@ -12,7 +12,7 @@ import {createServer} from './serve.mjs';
 if(!process.env.NR_UPSTREAM||!process.env.NR_MODEL)throw Error('Set NR_UPSTREAM to the upstream repository and NR_MODEL to your local extracted model directory.');
 const upstream=path.resolve(process.env.NR_UPSTREAM),model=path.resolve(process.env.NR_MODEL);
 const oursRevision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
-const sourceHashes=Object.fromEntries(await Promise.all(['kernels/numeric.cuh','kernels/gemm-half.cu','vendor/webcuda/compiler/compiler.js','vendor/webcuda/compiler/cpu-oracle.js'].map(async file=>[file,createHash('sha256').update(await readFile(file)).digest('hex')])));
+const sourceHashes=Object.fromEntries(await Promise.all(['kernels/numeric.cuh','kernels/gemm-half.cu','kernels/gemm-wide.cu','kernels/attention-normalized.cu','kernels/fast-half.cuh','kernels/lookup.cu','vendor/webcuda/compiler/compiler.js','vendor/webcuda/compiler/cpu-oracle.js'].map(async file=>[file,createHash('sha256').update(await readFile(file)).digest('hex')])));
 const oursWorkingTreeDirty=Boolean(execFileSync('git',['status','--porcelain','--untracked-files=no'],{encoding:'utf8'}).trim());
 const revision=execFileSync('git',['-C',upstream,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
 const upstreamDirty=execFileSync('git',['-C',upstream,'status','--porcelain'],{encoding:'utf8'}).trim();

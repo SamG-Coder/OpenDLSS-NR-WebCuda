@@ -13,6 +13,8 @@ test('Renderer rejects invalid cache budgets and GEMM modes before requesting a 
   await assert.rejects(NeuralRenderer.create({}, {cacheNoise:1}),/cacheNoise/);
   await assert.rejects(NeuralRenderer.create({}, {specializeGemm:1}),/specializeGemm/);
   await assert.rejects(NeuralRenderer.create({}, {nativeHalf:1}),/nativeHalf/);
+  await assert.rejects(NeuralRenderer.create({}, {wideGemm:1}),/wideGemm/);
+  await assert.rejects(NeuralRenderer.create({}, {normalizeAttention:1}),/normalizeAttention/);
   for(const graphBatchSize of [0,65,NaN,1.5])await assert.rejects(NeuralRenderer.create({}, {graphBatchSize}),/batch size/);
   await assert.rejects(NeuralRenderer.create({}, {activationStorage:'unknown'}),/activation storage/);
   await assert.rejects(NeuralRenderer.create({}, {executionMode:'unknown'}),/execution plan/);
@@ -59,4 +61,19 @@ test('Half pipelines require both the device feature and renderer option',async(
     features.add('shader-f16');await NeuralRenderer.create({});assert.deepEqual(loaded,[base,base+'_half']);loaded.length=0;
     await NeuralRenderer.create({},{nativeHalf:false});assert.deepEqual(loaded,[base]);
   }finally{GpuRuntime.create=originalCreate;globalThis.fetch=originalFetch;}
+});
+
+test('Fused normalization skips devices below its shared-memory requirement',async()=>{
+ const originalCreate=GpuRuntime.create,originalFetch=globalThis.fetch,loaded=[];
+ const device={features:new Set(['shader-f16']),limits:{maxComputeWorkgroupStorageSize:16384}};
+ GpuRuntime.create=async()=>({device,kernel:async a=>{loaded.push(a.entry);return {};},dispose:()=>{}});
+ globalThis.fetch=async url=>({ok:true,json:async()=>String(url).endsWith('/manifest.json')?{nr_local_attention_normalized:'nr_local_attention_normalized.json'}:{entry:String(url).split('/').pop().replace('.json','')}});
+ try{
+  await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,[]);
+  device.limits.maxComputeWorkgroupStorageSize=32768;
+  await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,['nr_local_attention_normalized']);loaded.length=0;
+  device.limits.maxComputeInvocationsPerWorkgroup=256;await NeuralRenderer.create({},{normalizeAttention:true});assert.deepEqual(loaded,[]);device.limits.maxComputeInvocationsPerWorkgroup=512;
+  await NeuralRenderer.create({},{normalizeAttention:false});assert.deepEqual(loaded,[]);
+  await NeuralRenderer.create({},{normalizeAttention:true,activationStorage:'float'});assert.deepEqual(loaded,[]);
+ }finally{GpuRuntime.create=originalCreate;globalThis.fetch=originalFetch;}
 });

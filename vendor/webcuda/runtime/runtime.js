@@ -44,12 +44,14 @@ export function validateWorkgroup(metadata, limits) {
 }
 export class GpuRuntime {
   static async create(options = {}) {
+    if(options.useAdapterWorkgroupLimits !== undefined && typeof options.useAdapterWorkgroupLimits !== 'boolean') throw new TypeError('useAdapterWorkgroupLimits must be a boolean.');
     if(options.useAdapterBufferLimits !== undefined && typeof options.useAdapterBufferLimits !== 'boolean') throw new TypeError('useAdapterBufferLimits must be a boolean.');
     if (!globalThis.navigator?.gpu && !options.device) throw new Error('WebGPU is required. Open this project on localhost or HTTPS in a WebGPU-capable browser. WebGL cannot run these kernels.');
     const adapter = options.adapter || (!options.device ? await navigator.gpu.requestAdapter({powerPreference:'high-performance'}) : null);
     if (!adapter && !options.device) throw new Error('No WebGPU adapter is available. Check the browser GPU settings and graphics driver.');
     const features = ['shader-f16','timestamp-query','core-features-and-limits','float32-filterable','subgroups','subgroup-size-control'].filter(f => adapter?.features.has(f));
     const requiredLimits = adapter ? {
+      ...(options.useAdapterWorkgroupLimits?{maxComputeWorkgroupStorageSize:adapter.limits.maxComputeWorkgroupStorageSize}:{}),
       maxStorageBuffersPerShaderStage: Math.min(adapter.limits.maxStorageBuffersPerShaderStage,16),
       maxComputeInvocationsPerWorkgroup: Math.min(adapter.limits.maxComputeInvocationsPerWorkgroup, 1024),
       maxComputeWorkgroupSizeX: Math.min(adapter.limits.maxComputeWorkgroupSizeX,1024),

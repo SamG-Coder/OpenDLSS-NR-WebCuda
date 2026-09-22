@@ -1,5 +1,7 @@
 # Full generated-shader and execution comparison
 
+This is the baseline audit before wider CUDA execution. See [the implemented wider kernels and results](performance-wide.md) for the subsequent optimization.
+
 Measured 2026-09-22 on RTX 5080 / Edge 153.0.4234.48. This compares the entire executed network, not just a representative GEMM shader. WebCuda includes native half support and the new production CUDA `__clz` lowering from `b8e8cd0`. The renderer was measured with the __clz working-tree change atop `62782e4`; raw reports include the measured kernel/compiler SHA-256 fingerprints. Upstream is the unmodified `9d08f4184bbcb9d858e2fb7a7834ec0837a9d2f1` checkout.
 
 ## End-to-end network timing

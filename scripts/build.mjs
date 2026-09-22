@@ -9,6 +9,7 @@ export const families = ['ops','gemm','attention','frame'];
 export async function build() {
   await mkdir('generated',{recursive:true});
   const header = (await readFile('kernels/numeric.cuh','utf8')).replace(/^#pragma once\s*/m,'');
+  const fastHalf=(await readFile('kernels/fast-half.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const packed = (await readFile('kernels/packed.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const activationHeader=(await readFile('kernels/activations.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const manifest = {};
@@ -33,6 +34,16 @@ export async function build() {
       console.log(`${entry}: ${artifact.wgsl.length} bytes WGSL`);
     }
   }
+  {
+    const source=(await readFile('kernels/attention-normalized.cu','utf8')).replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "attention.cu"\s*/m,await readFile('generated/attention.cu','utf8')).replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
+    const entry='nr_local_attention_normalized',artifact=compile(source.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry,workgroupSize:[512,1,1]});
+    await writeFile('generated/'+entry+'.cu',source);await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));manifest[entry]=entry+'.json';
+  }
+  {
+    const source=header+'\n'+(await readFile('kernels/lookup.cu','utf8')).replace(/^#include "numeric.cuh"\s*/m,'');
+    const entry='nr_lookup_tables',artifact=compile(source,{entry,workgroupSize:[64,1,1]});
+    await writeFile('generated/'+entry+'.cu',source);await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));manifest[entry]=entry+'.json';
+  }
   const template=await readFile('kernels/gemm-tiled.cu','utf8');
   for(const [entry,rows,cols] of [['nr_gemm_tiled',4,16],['nr_gemm_tile8x8',8,8],['nr_gemm_tile8x16',8,16]]) {
     const source=header+'\n'+template.replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace('#define NR_TILE_ROWS 4','#define NR_TILE_ROWS '+rows).replace('#define NR_TILE_COLS 16','#define NR_TILE_COLS '+cols).replace('#define NR_TILE_ENTRY nr_gemm_tiled','#define NR_TILE_ENTRY '+entry);
@@ -52,6 +63,7 @@ export async function build() {
     await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));
     manifest[entry]=entry+'.json';await compact(source,entry,workgroupSize);
   }
+  const wideTemplate=await readFile('kernels/gemm-wide.cu','utf8');
   const halfTemplate=await readFile('kernels/gemm-half.cu','utf8');
   const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true});
   for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
@@ -69,6 +81,12 @@ export async function build() {
       const halfName=name+'_half',halfSource=specializeGemmSource(compactKernel(halfCuda,baseEntry,activationHeader),entry,halfName,scalars);
       const halfArtifact=compile(halfSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:halfName,workgroupSize:base.metadata.workgroupSize});
       await writeFile('generated/'+halfName+'.cu',halfSource);await writeFile('generated/'+halfName+'.json',JSON.stringify(serializableArtifact(halfArtifact)));manifest[halfName]=halfName+'.json';
+      if(scalars.N%4===0&&[1,2].includes(scalars.outputFormat)&&(!scalars.rawEnabled||scalars.rawFormat===2)){
+        const wideCuda=header+'\n'+wideTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
+        const wideName=name+'_wide_half',wideSource=specializeGemmSource(wideCuda,'nr_gemm_wide',wideName,scalars);
+        const wideArtifact=compile(wideSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:wideName,workgroupSize:[128,1,1]});
+        await writeFile('generated/'+wideName+'.cu',wideSource);await writeFile('generated/'+wideName+'.json',JSON.stringify(serializableArtifact(wideArtifact)));manifest[wideName]=wideName+'.json';
+      }
     }
   }
   await writeFile('generated/manifest.json',JSON.stringify(manifest,null,2));

@@ -8,7 +8,7 @@ import {dispatchGroups} from '../src/kernel-selection.js';
 const report={passed:0,failed:0,checks:[]};let runtime;
 const check=(name,ok,detail='')=>{report[ok?'passed':'failed']++;report.checks.push({name,ok,detail});};
 try {
-  runtime=await GpuRuntime.create({onError:e=>{throw e;}});report.adapter=runtime.describe();
+  runtime=await GpuRuntime.create({useAdapterWorkgroupLimits:true,onError:e=>{throw e;}});report.adapter=runtime.describe();
   const manifest=await (await fetch('../generated/manifest.json')).json(),kernels={};
   for(const [name,file] of Object.entries(manifest))kernels[name]=await runtime.kernel(await(await fetch('../generated/'+file)).json());
   check('All CUDA-generated shaders create GPU pipelines',true,Object.keys(kernels).length+' kernels');
@@ -51,6 +51,8 @@ try {
   }
   {
     const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true}),tested=new Set();
+    const metadata=runtime.createBuffer(2048),siluTable=runtime.createBuffer(262144);
+    runtime.batch().dispatch(kernels.nr_lookup_tables.bind({metadata,silu:siluTable}),[1024,1,1]).submit();
     const packed=(count,format)=>{const lanes=format===1?4:2,bits=format===1?8:16,a=new Uint32Array(Math.ceil(count/lanes));for(let i=0;i<count;i++)a[Math.floor(i/lanes)]|=(format===1?(24+(i*17)%48)|(i%3?0:128):0x3000+(i%31)|(i%3?0:32768))<<((i%lanes)*bits);return a;};
     for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
       const s={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
@@ -59,16 +61,34 @@ try {
       try {
         runtime.batch().dispatch(kernels.nr_gemm_packed_compact.bind(bindings,s),[Math.ceil(count/64),1,1]).submit();
         const expected=await runtime.read(bindings.output,Uint32Array),raw=await runtime.read(bindings.raw,Uint32Array);
-        for(const variant of [name,...(kernels[name+'_half']?[name+'_half']:[])]){tested.add(variant);
+        for(const variant of [name,...[name+'_half',name+'_wide_half'].filter(k=>kernels[k])]){tested.add(variant);
         runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
         // Deliberate surplus tile exercises row guards with all lanes reaching barriers.
-        runtime.batch().dispatch(kernels[variant].bind(bindings,dynamicGemmScalars(s)),[dispatchGroups(base,s,count)+1,1,1]).submit();
+        runtime.batch().dispatch(kernels[variant].bind(variant.endsWith('_wide_half')?{...bindings,metadata,siluTable}:bindings,dynamicGemmScalars(s)),[(variant.endsWith('_wide_half')?Math.ceil(s.rows/32)*s.batches*Math.ceil(s.N/32):dispatchGroups(base,s,count))+1,1,1]).submit();
         const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
         check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]));
         }
       }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
     }
     check('Every built specialization is covered',Object.keys(kernels).filter(k=>/_compact_s[0-9]/.test(k)).every(k=>tested.has(k)));
+    runtime.destroyBuffer(metadata);runtime.destroyBuffer(siluTable);
+  }
+  {
+    const width=37,height=35,heads=2,rows=width*height;
+    const packed=new Uint32Array(rows*heads*96/2);
+    for(let i=0;i<packed.length;i++){const lo=i<96?0:(0x2800+(i%2048))|(i%3?0:32768),hi=i<96?0:(0x3000+(i%1024))|(i%5?0:32768);packed[i]=lo|(hi<<16);}
+    const qkv=runtime.createBuffer(packed),scales=runtime.createBuffer(new Float32Array([.7,1.2])),norm=runtime.createBuffer(rows*heads*96),prior=runtime.createBuffer(Float32Array.from({length:heads*64*64},(_,i)=>(i%31-15)/32));
+    const sentinel=new Uint32Array(rows*heads*8+2).fill(0xdeadbeef),expected=runtime.createBuffer(sentinel),actual=runtime.createBuffer(sentinel);
+    try{
+      runtime.batch().dispatch(kernels.nr_normalize_compact.bind({qkv,scales,output:norm},{rows,heads,globalMode:0,qkvFormat:2,outputFormat:1}),[Math.ceil(rows*heads/64),1,1]).submit();
+      for(const [shiftX,shiftY] of [[0,0],[4,4],[0,4],[4,0]]){
+        const args={width,height,heads,shiftX,shiftY};runtime.write(expected,sentinel);runtime.write(actual,sentinel);
+        runtime.batch().dispatch(kernels.nr_local_attention_compact.bind({qkv:norm,prior,output:expected},{...args,qkvFormat:1,outputFormat:1}),[dispatchGroups('nr_local_attention',args,0)+1,1,1]).submit();
+        runtime.batch().dispatch(kernels.nr_local_attention_normalized.bind({qkv,scales,prior,output:actual},args),[dispatchGroups('nr_local_attention_normalized',args,0)+1,1,1]).submit();
+        const a=await runtime.read(expected,Uint32Array),b=await runtime.read(actual,Uint32Array);
+        check(`Fused normalization: partial windows, zero rows and guards at shift ${shiftX},${shiftY}`,a.every((v,i)=>v===b[i]));
+      }
+    }finally{for(const b of [qkv,scales,norm,prior,expected,actual])runtime.destroyBuffer(b);}
   }
   // Exhaust every finite half bit pattern, plus NaNs/infinities, without assuming float32 NaN payloads survive.
   const values=Float32Array.from({length:65536},(_,i)=>half(i));
@@ -268,7 +288,7 @@ try {
   const preparedWarm=await prepared.run(args);
   check('Prepared packed graph reuses every graph allocation and binding',preparedWarm.workingBuffers.prepared&&preparedWarm.workingBuffers.created===0&&runtime.stats.bindGroupsCreated===beforeWarmBinds&&preparedWarm.head.every((v,i)=>Object.is(v,run.head[i])));
   const changed=await prepared.run({...resizeArgs,profile:true});
-  check('Prepared graph resizes safely and supports timestamp profiling',changed.head.length===36&&changed.head.every(v=>v===0)&&(!changed.profile.supported||changed.profile.dispatches.length===529));
+  check('Prepared graph resizes safely and supports timestamp profiling',changed.head.length===36&&changed.head.every(v=>v===0)&&(!changed.profile.supported||changed.profile.dispatches.length===467));
   const cancelPlan=new AbortController();let planCancelled=false;
   try{await prepared.run({...resizeArgs,signal:cancelPlan.signal,onProgress:({index})=>{if(index===3)cancelPlan.abort();}});}catch(e){planCancelled=e.name==='AbortError';}
   const resumedPlan=await prepared.run(resizeArgs);

@@ -14,6 +14,7 @@ export function gemmKernel({rows,K,N,batches,halfMode},mode='auto') {
 }
 
 export function dispatchGroups(entry,s,count) {
+  if(entry==='nr_local_attention_normalized')return s.heads*Math.ceil((s.width+s.shiftX)/8)*Math.ceil((s.height+s.shiftY)/8)*2;
   if(entry==='nr_local_attention')return s.heads*Math.ceil((s.width+s.shiftX)/8)*Math.ceil((s.height+s.shiftY)/8)*8;
   const tile={nr_gemm_multi32x32:[32,32],nr_gemm_multi16x64:[16,64],nr_gemm_multi8x32:[8,32],nr_gemm_multi16x16:[16,16],nr_gemm_multi16x32:[16,32],nr_gemm_multi4x32:[4,32],nr_gemm_tiled:[4,16],nr_gemm_tile8x8:[8,8],nr_gemm_tile8x16:[8,16]}[entry];
   if(tile)return Math.ceil(s.rows/tile[0])*s.batches*Math.ceil(s.N/tile[1]);

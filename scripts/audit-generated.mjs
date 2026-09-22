@@ -40,7 +40,7 @@ try {
           return new Response(JSON.stringify(artifact),{headers:{'Content-Type':'application/json'}});
         };
         try{
-          const renderer=await NeuralRenderer.create(model,{nativeHalf:true});
+          const renderer=await NeuralRenderer.create(model,{nativeHalf:true,wideGemm:false,normalizeAttention:false});
           if(edited&&!changed){renderer.dispose();throw Error('No eligible emitted shaders changed');}
           return renderer;
         }finally{globalThis.fetch=originalFetch;}

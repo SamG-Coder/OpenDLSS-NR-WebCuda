@@ -1,6 +1,7 @@
 import {geometry,layout,phases,align} from './geometry.js';
 // Host scheduling only. Every numerical operation is compiled from kernels/*.cu.
-export function createGraph(width,height,{geometryOverride,activationStorage='float',fuseLocalAttention=false}={}) {
+export function createGraph(width,height,{geometryOverride,activationStorage='float',fuseLocalAttention=false,fuseNormalization=false}={}) {
+  if(fuseNormalization&&(!fuseLocalAttention||activationStorage!=='packed'))throw Error('Fused normalization requires packed local attention.');
   const g=geometryOverride||geometry(width,height),ops=[],resources=new Map();let serial=0;
   const phasesUsed=Array(7).fill(0),boundaries={};
   function resource(rows,channels,label) {const id=`${label}:${serial++}`;resources.set(id,{rows,channels,bytes:rows*channels*4});return id;}
@@ -95,6 +96,13 @@ export function createGraph(width,height,{geometryOverride,activationStorage='fl
     const op=ops[i];
     if(op.entry!=='nr_scores'||op.scalars.globalMode)continue;
     const softmax=ops[i+1],attend=ops[i+2];
+    if(fuseNormalization){
+      const norm=ops[i-1];
+      if(norm.entry!=='nr_normalize'||norm.bindings.output!==op.bindings.qkv)throw Error('Local normalization adjacency changed');
+      for(const id of [norm.bindings.output,op.bindings.scores,softmax.bindings.weights,softmax.bindings.inverse])resources.delete(id);
+      ops.splice(i-1,4,{entry:'nr_local_attention_normalized',bindings:{qkv:norm.bindings.qkv,scales:norm.bindings.scales,prior:op.bindings.prior,output:attend.bindings.output},scalars:Object.fromEntries(Object.entries(op.scalars).filter(([key])=>key!=='padded'&&key!=='globalMode')),count:attend.count,label:'normalized-local-attention'});
+      i--;continue;
+    }
     for(const id of [op.bindings.scores,softmax.bindings.weights,softmax.bindings.inverse])resources.delete(id);
     ops.splice(i,3,{entry:'nr_local_attention',bindings:{qkv:op.bindings.qkv,prior:op.bindings.prior,output:attend.bindings.output},scalars:Object.fromEntries(Object.entries(op.scalars).filter(([key])=>key!=='padded'&&key!=='globalMode')),count:attend.count,label:'local-attention'});
   }
