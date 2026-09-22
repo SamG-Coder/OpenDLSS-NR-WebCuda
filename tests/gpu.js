@@ -56,17 +56,24 @@ try {
     const packed=(count,format)=>{const lanes=format===1?4:2,bits=format===1?8:16,a=new Uint32Array(Math.ceil(count/lanes));for(let i=0;i<count;i++)a[Math.floor(i/lanes)]|=(format===1?(24+(i*17)%48)|(i%3?0:128):0x3000+(i%31)|(i%3?0:32768))<<((i%lanes)*bits);return a;};
     for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
       const s={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
-      const base=gemmKernel(s),name=specializedGemm(base+'_compact',s);if(!name||tested.has(name))continue;tested.add(name);s.rows=9;
+      const base=gemmKernel(s),name=specializedGemm(base+'_compact',s);if(!name||tested.has(name))continue;tested.add(name);
+      // Cross a 64-row boundary and leave a partial 64-column tile in the small QKV case.
+      s.rows=s.K===32&&s.N===96?65:9;
       const count=s.rows*s.N*s.batches,bindings={input:runtime.createBuffer(packed(s.rows*s.inputStride,s.inputFormat)),weights:runtime.createBuffer(packed(s.K*s.N*s.batches,1)),residual:runtime.createBuffer(s.hasResidual?packed(count,s.residualFormat):new Uint32Array(1)),scales:runtime.createBuffer(new Float32Array(s.N*s.batches).fill(.5)),raw:runtime.createBuffer(new Uint32Array((s.rawEnabled?count/2:1)+2).fill(0xdeadbeef)),output:runtime.createBuffer(new Uint32Array(count*(s.outputFormat===1?1:2)/4+2).fill(0xdeadbeef))};
       try {
         runtime.batch().dispatch(kernels.nr_gemm_packed_compact.bind(bindings,s),[Math.ceil(count/64),1,1]).submit();
         const expected=await runtime.read(bindings.output,Uint32Array),raw=await runtime.read(bindings.raw,Uint32Array);
-        for(const variant of [name,...[name+'_half',name+'_wide_half'].filter(k=>kernels[k])]){tested.add(variant);
+        const variants=[{name},{name:name+'_half'},
+          {name:name+'_wide_half',rows:32,cols:32},
+          {name:name+'_wide64x32_half',rows:64,cols:32},
+          {name:name+'_wide32x64_half',rows:32,cols:64}];
+        for(const {name:variant,rows:tileRows,cols:tileCols} of variants.filter(v=>kernels[v.name])){tested.add(variant);
         runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
         // Deliberate surplus tile exercises row guards with all lanes reaching barriers.
-        runtime.batch().dispatch(kernels[variant].bind(variant.endsWith('_wide_half')?{...bindings,metadata,siluTable}:bindings,dynamicGemmScalars(s)),[(variant.endsWith('_wide_half')?Math.ceil(s.rows/32)*s.batches*Math.ceil(s.N/32):dispatchGroups(base,s,count))+1,1,1]).submit();
+        const groups=tileRows?Math.ceil(s.rows/tileRows)*s.batches*Math.ceil(s.N/tileCols):dispatchGroups(base,s,count);
+        runtime.batch().dispatch(kernels[variant].bind(tileRows?{...bindings,metadata,siluTable}:bindings,dynamicGemmScalars(s)),[groups+1,1,1]).submit();
         const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
-        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]));
+        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]),`${s.rows} rows, ${s.N} columns, ${s.batches} batches; output and raw guards included`);
         }
       }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
     }

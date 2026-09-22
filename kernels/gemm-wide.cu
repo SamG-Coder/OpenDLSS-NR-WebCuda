@@ -4,9 +4,19 @@
 #include "packed.cuh"
 #include "activations.cuh"
 #include "vector-f13.cuh"
+#define NR_WIDE_ROWS 32
+#define NR_WIDE_COLS 32
+#define NR_WIDE_THREADS 128
+#define NR_WIDE_COLUMN_GROUPS 8
+#define NR_WIDE_A_PAIRS 512
+#define NR_WIDE_B_PAIRS 544
+#define NR_WIDE_INPUT_WORDS 256
+#define NR_WIDE_WEIGHT_PAIRS 128
 // Requires packed FP8 input, bounded weights, four-element-aligned dimensions
 // and input strides, and packed outputs. The build enforces this specialization.
-// Each invocation owns eight outputs across two rows; each row has four consecutive columns and therefore every output word it writes.
+// Each invocation owns eight outputs across two rows and four columns.
+// The build selects 32x32, 64x32 or 32x64 tiles without changing K-group order.
+// Each row owns every packed output word it writes.
 __device__ void nr_wide_store4(unsigned* data, unsigned index, float a, float b, float c, float d, int format) {
   if(format == 1) data[index >> 2u] = nr_e4_code(a) | (nr_e4_code(b) << 8u) | (nr_e4_code(c) << 16u) | (nr_e4_code(d) << 24u);
   else {
@@ -15,19 +25,19 @@ __device__ void nr_wide_store4(unsigned* data, unsigned index, float a, float b,
   }
 }
 __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, const unsigned* input, const unsigned* weights, const unsigned* residual, const float* scales, unsigned* raw, unsigned* output, unsigned rows, unsigned K, unsigned N, unsigned batches, unsigned inputStride, unsigned inputBatchStride, unsigned partition, int halfMode, int silu, int hasResidual, int quantize, int inputFormat, int residualFormat, int rawFormat, int outputFormat, int rawEnabled) {
-  __shared__ __half2 tileA[512];
-  __shared__ __half2 tileB[544];
-  __shared__ __half2 expA[512];
-  __shared__ __half2 expB[544];
+  __shared__ __half2 tileA[NR_WIDE_A_PAIRS];
+  __shared__ __half2 tileB[NR_WIDE_B_PAIRS];
+  __shared__ __half2 expA[NR_WIDE_A_PAIRS];
+  __shared__ __half2 expB[NR_WIDE_B_PAIRS];
   unsigned tid=threadIdx.x;
   unsigned tile=blockIdx.x+blockIdx.y*gridDim.x;
-  unsigned columns=(N+31u)/32u;
-  unsigned colBase=tile%columns*32u;
+  unsigned columns=(N+NR_WIDE_COLS-1u)/NR_WIDE_COLS;
+  unsigned colBase=tile%columns*NR_WIDE_COLS;
   unsigned batch=tile/columns%batches;
-  unsigned rowBase=tile/columns/batches*32u;
-  unsigned localRow=tid/8u*2u;
+  unsigned rowBase=tile/columns/batches*NR_WIDE_ROWS;
+  unsigned localRow=tid/NR_WIDE_COLUMN_GROUPS*2u;
   unsigned row=rowBase+localRow;
-  unsigned col=colBase+tid%8u*4u;
+  unsigned col=colBase+tid%NR_WIDE_COLUMN_GROUPS*4u;
   unsigned i=(row*batches+batch)*N+col;
   unsigned next=i+batches*N;
   float acc0=row+0u<rows && col+0u<N && hasResidual!=0 ? nr_half(nr_activation_load(residual,i+0u,residualFormat)*scales[batch*N+col+0u]):0.0f;
@@ -48,7 +58,7 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
   float total7=0.0f;
   for(unsigned kb=0u;kb<K;kb+=32u){
     // Load aligned FP8 words once, then stage paired K values.
-    for(unsigned t=tid;t<256u;t+=128u){
+    for(unsigned t=tid;t<NR_WIDE_INPUT_WORDS;t+=NR_WIDE_THREADS){
       unsigned ar=rowBase+t/8u,ak=kb+(t%8u)*4u;
       unsigned ai=ar*inputStride+batch*inputBatchStride+ak;
       unsigned word=ar<rows && ak<K?input[ai>>2u]:0u;
@@ -59,16 +69,18 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
       expA[a]=__floats2half2_rn(metadata[c0*2u+1u],metadata[c1*2u+1u]);
       expA[a+1u]=__floats2half2_rn(metadata[c2*2u+1u],metadata[c3*2u+1u]);
     }
-    unsigned bk=kb+(tid/8u)*2u,bc=colBase+(tid%8u)*4u;
-    unsigned wi=(batch*K+bk)*N+bc;
-    unsigned w0=bk<K && bc<N?weights[wi>>2u]:0u;
-    unsigned w1=bk+1u<K && bc<N?weights[(wi+N)>>2u]:0u;
-    #pragma unroll
-    for(unsigned lane=0u;lane<4u;lane+=1u){
-      unsigned c0=(w0>>(lane*8u))&255u,c1=(w1>>(lane*8u))&255u;
-      unsigned b=(tid%8u*4u+lane)*17u+tid/8u;
-      tileB[b]=__floats2half2_rn(metadata[c0*2u],metadata[c1*2u]);
-      expB[b]=__floats2half2_rn(metadata[c0*2u+1u],metadata[c1*2u+1u]);
+    for(unsigned t=tid;t<NR_WIDE_WEIGHT_PAIRS;t+=NR_WIDE_THREADS){
+      unsigned bk=kb+(t/NR_WIDE_COLUMN_GROUPS)*2u,bc=colBase+(t%NR_WIDE_COLUMN_GROUPS)*4u;
+      unsigned wi=(batch*K+bk)*N+bc;
+      unsigned w0=bk<K && bc<N?weights[wi>>2u]:0u;
+      unsigned w1=bk+1u<K && bc<N?weights[(wi+N)>>2u]:0u;
+      #pragma unroll
+      for(unsigned lane=0u;lane<4u;lane+=1u){
+        unsigned c0=(w0>>(lane*8u))&255u,c1=(w1>>(lane*8u))&255u;
+        unsigned b=(t%NR_WIDE_COLUMN_GROUPS*4u+lane)*17u+t/NR_WIDE_COLUMN_GROUPS;
+        tileB[b]=__floats2half2_rn(metadata[c0*2u],metadata[c1*2u]);
+        expB[b]=__floats2half2_rn(metadata[c0*2u+1u],metadata[c1*2u+1u]);
+      }
     }
     __syncthreads();
     // Two ordered native groups share the same staged K slab.
@@ -82,16 +94,16 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
           unsigned k=part*8u+j;
           __half2 a0=expA[localRow*16u+k];
           __half2 a1=expA[(localRow+1u)*16u+k];
-          __half2 b0=expB[(tid%8u*4u+0u)*17u+k];
+          __half2 b0=expB[(tid%NR_WIDE_COLUMN_GROUPS*4u+0u)*17u+k];
           float2 ex0=__half22float2(__hadd2(a0,b0));
           float2 ex4=__half22float2(__hadd2(a1,b0));
-          __half2 b1=expB[(tid%8u*4u+1u)*17u+k];
+          __half2 b1=expB[(tid%NR_WIDE_COLUMN_GROUPS*4u+1u)*17u+k];
           float2 ex1=__half22float2(__hadd2(a0,b1));
           float2 ex5=__half22float2(__hadd2(a1,b1));
-          __half2 b2=expB[(tid%8u*4u+2u)*17u+k];
+          __half2 b2=expB[(tid%NR_WIDE_COLUMN_GROUPS*4u+2u)*17u+k];
           float2 ex2=__half22float2(__hadd2(a0,b2));
           float2 ex6=__half22float2(__hadd2(a1,b2));
-          __half2 b3=expB[(tid%8u*4u+3u)*17u+k];
+          __half2 b3=expB[(tid%NR_WIDE_COLUMN_GROUPS*4u+3u)*17u+k];
           float2 ex3=__half22float2(__hadd2(a0,b3));
           float2 ex7=__half22float2(__hadd2(a1,b3));
           exponents0=nr_max4(exponents0,make_float4(ex0.x,ex1.x,ex2.x,ex3.x));
@@ -116,16 +128,16 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
           unsigned k=part*8u+j;
           __half2 a0=tileA[localRow*16u+k];
           __half2 a1=tileA[(localRow+1u)*16u+k];
-          __half2 b0=tileB[(tid%8u*4u+0u)*17u+k];
+          __half2 b0=tileB[(tid%NR_WIDE_COLUMN_GROUPS*4u+0u)*17u+k];
           float2 p0=__half22float2(__hmul2(a0,b0));
           float2 p4=__half22float2(__hmul2(a1,b0));
-          __half2 b1=tileB[(tid%8u*4u+1u)*17u+k];
+          __half2 b1=tileB[(tid%NR_WIDE_COLUMN_GROUPS*4u+1u)*17u+k];
           float2 p1=__half22float2(__hmul2(a0,b1));
           float2 p5=__half22float2(__hmul2(a1,b1));
-          __half2 b2=tileB[(tid%8u*4u+2u)*17u+k];
+          __half2 b2=tileB[(tid%NR_WIDE_COLUMN_GROUPS*4u+2u)*17u+k];
           float2 p2=__half22float2(__hmul2(a0,b2));
           float2 p6=__half22float2(__hmul2(a1,b2));
-          __half2 b3=tileB[(tid%8u*4u+3u)*17u+k];
+          __half2 b3=tileB[(tid%NR_WIDE_COLUMN_GROUPS*4u+3u)*17u+k];
           float2 p3=__half22float2(__hmul2(a0,b3));
           float2 p7=__half22float2(__hmul2(a1,b3));
           sums0=nr_accumulate4(sums0,make_float4(p0.x,p1.x,p2.x,p3.x),scales0);

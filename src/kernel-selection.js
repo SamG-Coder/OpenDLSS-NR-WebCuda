@@ -24,3 +24,11 @@ export function dispatchGroups(entry,s,count) {
   }
   return Math.ceil(count/64);
 }
+
+// Kernels flatten blockIdx.xy with gridDim.x. A full-width last row can almost
+// double the work just above the dimension limit; balance X to keep <Y extras.
+export function dispatchGrid(groups,limit){
+  if(!Number.isSafeInteger(groups)||groups<1||!Number.isSafeInteger(limit)||limit<1||groups>limit*limit)throw Error('Dispatch exceeds device limits.');
+  const y=Math.ceil(groups/limit);
+  return [Math.ceil(groups/y),y,1];
+}

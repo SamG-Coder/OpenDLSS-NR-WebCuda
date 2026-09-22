@@ -14,6 +14,7 @@
     "benchmark:upstream": "node scripts/benchmark-upstream.mjs",
     "benchmark:execution": "node scripts/benchmark-execution.mjs",
     "benchmark:gemm": "node scripts/benchmark-gemm.mjs",
+    "benchmark:tiles": "node scripts/benchmark-tiles.mjs",
     "benchmark": "node scripts/benchmark.mjs",
     "test:native": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native.ps1",
     "build:site": "node scripts/build-site.mjs",

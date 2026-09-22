@@ -84,9 +84,14 @@ export async function build() {
       await writeFile('generated/'+halfName+'.cu',halfSource);await writeFile('generated/'+halfName+'.json',JSON.stringify(serializableArtifact(halfArtifact)));manifest[halfName]=halfName+'.json';
       if([scalars.K,scalars.N,scalars.inputStride,scalars.inputBatchStride].every(n=>n%4===0)&&[1,2].includes(scalars.outputFormat)&&(!scalars.rawEnabled||scalars.rawFormat===2)){
         const wideCuda=header+'\n'+wideTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "vector-f13.cuh"\s*/m,vectorF13+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
-        const wideName=name+'_wide_half',wideSource=specializeGemmSource(wideCuda,'nr_gemm_wide',wideName,scalars);
-        const wideArtifact=compile(wideSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:wideName,workgroupSize:[128,1,1]});
-        await writeFile('generated/'+wideName+'.cu',wideSource);await writeFile('generated/'+wideName+'.json',JSON.stringify(serializableArtifact(wideArtifact)));manifest[wideName]=wideName+'.json';
+        for(const [tileRows,tileCols] of [[32,32],[64,32],[32,64]]){
+          const suffix=tileRows===32&&tileCols===32?'_wide_half':`_wide${tileRows}x${tileCols}_half`;
+          const defines={ROWS:tileRows,COLS:tileCols,THREADS:tileRows*tileCols/8,COLUMN_GROUPS:tileCols/4,A_PAIRS:tileRows*16,B_PAIRS:tileCols*17,INPUT_WORDS:tileRows*8,WEIGHT_PAIRS:tileCols*4};
+          let tileCuda=wideCuda;for(const [key,value] of Object.entries(defines))tileCuda=tileCuda.replace(new RegExp('#define NR_WIDE_'+key+' \\d+'),'#define NR_WIDE_'+key+' '+value);
+          const wideName=name+suffix,wideSource=specializeGemmSource(tileCuda,'nr_gemm_wide',wideName,scalars);
+          const wideArtifact=compile(wideSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:wideName,workgroupSize:[defines.THREADS,1,1]});
+          await writeFile('generated/'+wideName+'.cu',wideSource);await writeFile('generated/'+wideName+'.json',JSON.stringify(serializableArtifact(wideArtifact)));manifest[wideName]=wideName+'.json';
+        }
       }
     }
   }
