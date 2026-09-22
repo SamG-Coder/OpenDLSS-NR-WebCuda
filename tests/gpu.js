@@ -22,6 +22,20 @@ try {
     runtime.destroyBuffer(input);runtime.destroyBuffer(output);
   }
   const dispatch=(entry,bindings,scalars,count)=>runtime.batch().dispatch(kernels[entry].bind(bindings,scalars),[Math.ceil(count/64),1,1]).submit();
+  // Separate cached noise must preserve every feature lane, including masked history and padding.
+  for(const seed of [0,219,4294967295]) {
+    const width=37,height=35,fullWidth=64,fullHeight=64,n=fullWidth*fullHeight;
+    const proxy=runtime.createBuffer(Float32Array.from({length:width*height*4},(_,i)=>(i%251)/251));
+    const history=runtime.createBuffer(Float32Array.from({length:width*height*4},(_,i)=>i%8===3?0:(i%197)/197));
+    const noise=runtime.createBuffer(n*8),reference=runtime.createBuffer(n*64),cached=runtime.createBuffer(n*64);
+    const scalars={width,height,fullWidth,fullHeight,seed,autoMask:seed?0:1,localTone:0.5,localStructure:0.25,skinStructure:-1,style:0.7,useHistory:1};
+    dispatch('nr_preprocess',{proxy,history,features:reference},scalars,n);
+    dispatch('nr_noise',{noise},{fullWidth,fullHeight,seed},n);
+    dispatch('nr_preprocess_cached',{noise,proxy,history,features:cached},scalars,n);
+    const a=await runtime.read(reference,Uint32Array),b=await runtime.read(cached,Uint32Array);
+    check(`Cached noise preserves all feature bits for seed ${seed}`,a.every((v,i)=>v===b[i]));
+    for(const buffer of [proxy,history,noise,reference,cached])runtime.destroyBuffer(buffer);
+  }
   // Exhaust every finite half bit pattern, plus NaNs/infinities, without assuming float32 NaN payloads survive.
   const values=Float32Array.from({length:65536},(_,i)=>half(i));
   const input=runtime.createBuffer(values),output=runtime.createBuffer(values.length*12),codes=runtime.createBuffer(values.length*4);

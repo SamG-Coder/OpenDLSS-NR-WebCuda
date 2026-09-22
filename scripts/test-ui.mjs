@@ -32,6 +32,7 @@ try{
   assert(await page.locator('#resolution-error').isHidden(),'Actual NR device supports the 54 MiB packed buffer');
   await page.locator('#run').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Completed in '),{},{timeout:600000});
   assert.deepEqual(await page.locator('#output').evaluate(c=>[c.width,c.height]),[512,512]);
+  const timing=await page.locator('#output').evaluate(c=>JSON.parse(c.dataset.timings));assert(timing.totalMs>0&&timing.inputMs>=0&&timing.presentationMs>=0&&timing.pngMs>=0);assert(timing.engine.totalMs<=timing.totalMs);
   console.log('Verified 512 × 512 3D preview before model setup and real NR output after loading DLL.');
   await page.locator('#width').fill('192');await page.locator('#width').dispatchEvent('change');await page.locator('#height').fill('128');await page.locator('#height').dispatchEvent('change');
   await page.locator('#run').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Completed in '),{},{timeout:600000});

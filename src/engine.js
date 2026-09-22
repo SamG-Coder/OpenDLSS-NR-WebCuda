@@ -7,7 +7,9 @@ import {GpuProfile} from './gpu-profile.js';
 import {gemmKernel,dispatchGroups} from './kernel-selection.js';
 export class NeuralRenderer {
   static async create(model,options={}) {
-    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,...runtimeOptions}=options;
+    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,maxInFlightBatches=4,cacheNoise=true,...runtimeOptions}=options;
+    if(!Number.isInteger(maxInFlightBatches)||maxInFlightBatches<1||maxInFlightBatches>8)throw Error('In-flight batch limit must be 1 through 8.');
+    if(typeof cacheNoise!=='boolean')throw Error('cacheNoise must be boolean.');
     if(!Number.isInteger(graphBatchSize)||graphBatchSize<1||graphBatchSize>64)throw Error('Graph batch size must be 1 through 64.');
     if(!Number.isSafeInteger(workspaceCacheBytes)||workspaceCacheBytes<0)throw Error('Invalid workspace cache budget.');
     if(!['auto','multi-auto','tiled','scalar','tile8x8','tile8x16','multi8x32','multi16x16','multi16x32','multi4x32','multi32x32','multi16x64'].includes(gemmMode))throw Error('Invalid GEMM mode.');
@@ -21,10 +23,10 @@ export class NeuralRenderer {
       for(const [entry,file] of Object.entries(manifest)) {
         if(entry.startsWith('nr_gemm_multi')&&!entry.startsWith('nr_gemm_'+(gemmMode==='multi-auto'?'multi32x32':gemmMode)))continue;
         const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
-      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize});
+      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize,maxInFlightBatches,cacheNoise});
     } catch(e) {runtime.dispose();throw e;}
   }
-  constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;this.attentionMode=attentionMode;this.activationStorage=activationStorage;this.executionMode=executionMode;this.planLimit=planCacheBytes;this.graphBatchSize=graphBatchSize;this.plan=null;this.graphCache=null;}
+  constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,maxInFlightBatches=4,cacheNoise=true}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;this.attentionMode=attentionMode;this.activationStorage=activationStorage;this.executionMode=executionMode;this.planLimit=planCacheBytes;this.graphBatchSize=graphBatchSize;this.plan=null;this.graphCache=null;this.maxInFlightBatches=maxInFlightBatches;this.cacheNoise=cacheNoise;this.noise=null;}
   clearWeightCache() {
     if(this.busy)throw Error('Cancel and await inference before clearing weights.');
     this.#releasePlan();
@@ -40,6 +42,7 @@ export class NeuralRenderer {
     this.plan=null;
   }
   #releaseWorkspace() {
+    if(this.noise)this.runtime.destroyBuffer(this.noise.buffer);this.noise=null;
     this.#releasePlan();
     for(const list of this.workspace.values())for(const b of list)this.runtime.destroyBuffer(b);
     this.workspace.clear();this.workspaceBytes=0;
@@ -56,11 +59,14 @@ export class NeuralRenderer {
     commands.dispatch(invocation,[Math.min(groups,limit),Math.ceil(groups/limit),1]);
     if(timed||!batch)commands.submit();
   }
-  async run({width,height,proxy,inputFeatures,history,motion,seed=0,conditioning={},onProgress=()=>{},capture,signal,geometryOverride,profile=false}={}) {
+  async run({width,height,proxy,inputFeatures,history,motion,seed=0,conditioning={},onProgress=()=>{},capture,signal,geometryOverride,profile=false,readHead=true}={}) {
+    if(typeof readHead!=='boolean')throw Error('readHead must be boolean.');
+    const started=performance.now(),timings={setupMs:0,encodeMs:0,waitMs:0,completionMs:0,totalMs:0};
     if(this.busy)throw Error('An inference is already running.');this.busy=true;
     this.profile=null;
     const runtime=this.runtime,model=this.model,live=new Map(),pool=this.workspace,owned=new Set();
     let poolBytes=this.workspaceBytes;const poolLimit=this.workspaceLimit;
+    let inFlight=0,noiseReused=false;
     let batch=null,queuedOps=0,retiredBytes=0;const retired=[];
     const retire=b=>{retired.push(b);retiredBytes+=b.size;owned.add(b);};
     // Evict the oldest free size bucket. Defer destruction until queued users finish.
@@ -72,9 +78,13 @@ export class NeuralRenderer {
       }
       const list=pool.get(b.size)||[];list.push(b);pool.delete(b.size);pool.set(b.size,list);poolBytes+=b.size;owned.delete(b);return true;
     };
-    const flush=async()=>{
-      if(batch){batch.submit();batch=null;}
-      await runtime.idle();
+    const flush=async(wait=true)=>{
+      if(batch){batch.submit();batch=null;inFlight++;}
+      queuedOps=0;
+      // Queue writes and submissions remain ordered, including the shared uniform arena.
+      // Only prepared plans retain every graph buffer until all submitted work completes.
+      if(!wait&&inFlight<this.maxInFlightBatches)return;
+      const t=performance.now();await runtime.idle();timings.waitMs+=performance.now()-t;inFlight=0;
       for(const b of retired){runtime.destroyBuffer(b);owned.delete(b);}
       retired.length=0;retiredBytes=0;queuedOps=0;
     };
@@ -118,10 +128,24 @@ export class NeuralRenderer {
       if(plan&&inputFeatures)runtime.write(featureBuffer,inputFeatures);
       live.set(graph.features,featureBuffer);
       if(!inputFeatures) {
-        this.dispatch('nr_preprocess',{proxy:proxyBuffer,history:historyBuffer,features:featureBuffer},{width,height,fullWidth:g.fullWidth,fullHeight:g.fullHeight,seed,autoMask:conditioning.autoMask??1,localTone:conditioning.localTone??1,localStructure:conditioning.localStructure??1,skinStructure:conditioning.skinStructure??-1,style:conditioning.style??0,useHistory:history?1:0},g.fullWidth*g.fullHeight);
+        let noise;
+        if(this.cacheNoise){
+          const key=JSON.stringify([g.fullWidth,g.fullHeight,seed]);
+          noiseReused=this.noise?.key===key;
+          if(!noiseReused){
+            if(this.noise)runtime.destroyBuffer(this.noise.buffer);this.noise=null;
+            const buffer=runtime.createBuffer(g.fullWidth*g.fullHeight*8);
+            try{this.dispatch('nr_noise',{noise:buffer},{fullWidth:g.fullWidth,fullHeight:g.fullHeight,seed},g.fullWidth*g.fullHeight);}
+            catch(error){runtime.destroyBuffer(buffer);throw error;}
+            this.noise={key,buffer};
+          }
+          noise=this.noise.buffer;
+        }
+        this.dispatch(noise?'nr_preprocess_cached':'nr_preprocess',{...(noise?{noise}:{}),proxy:proxyBuffer,history:historyBuffer,features:featureBuffer},{width,height,fullWidth:g.fullWidth,fullHeight:g.fullHeight,seed,autoMask:conditioning.autoMask??1,localTone:conditioning.localTone??1,localStructure:conditioning.localStructure??1,skinStructure:conditioning.skinStructure??-1,style:conditioning.style??0,useHistory:history?1:0},g.fullWidth*g.fullHeight);
       }
       const lastUse=new Map();graph.ops.forEach((op,i)=>Object.values(op.bindings).forEach(v=>{if(typeof v==='string')lastUse.set(v,i);}));lastUse.set(graph.head,graph.ops.length);
       const boundaryById=new Map(Object.entries(graph.boundaries).map(([name,id])=>[id,name]));
+      timings.setupMs=performance.now()-started;const graphStarted=performance.now();
       for(let index=0;index<graph.ops.length;index++) {
         if(signal?.aborted)throw new DOMException('Inference cancelled','AbortError');
         const op=graph.ops[index],bindings={},weights=[];
@@ -149,22 +173,25 @@ export class NeuralRenderer {
         const boundary=capture&&boundaryById.get(op.bindings.output);
         if(boundary){await flush();await capture(boundary,await this.readActivation(live.get(op.bindings.output),graph.resources.get(op.bindings.output)),graph.resources.get(op.bindings.output));}
         for(const [id,b] of live)if(lastUse.get(id)===index){live.delete(id);if(!plan)release(b);}
-        if(queuedOps>=(plan?this.graphBatchSize:8)||retiredBytes>=64*1024*1024)await flush();
+        if(queuedOps>=(plan?this.graphBatchSize:8)||retiredBytes>=64*1024*1024)await flush(!plan||!!capture||retiredBytes>=64*1024*1024);
         onProgress({index:index+1,total:graph.ops.length,label:op.label});
       }
       await flush();
+      timings.encodeMs=performance.now()-graphStarted-timings.waitMs;
       if(signal?.aborted)throw new DOMException('Inference cancelled','AbortError');
-      const head=await this.readActivation(live.get(graph.head),graph.resources.get(graph.head));let output=null;
+      let head=null,output=null;const readbackStarted=performance.now();
       if(proxy) {
         const blend=model.vector(model.tensor(70,0,'blend_scale'),0,1)[0],out=alloc(pixels*16);
         this.dispatch('nr_compose',{proxy:proxyBuffer,head:live.get(graph.head),history:historyBuffer,output:out},{width,height,fullWidth:g.fullWidth,blendScale:blend,useHistory:history?1:0},pixels,undefined,this.activationStorage==='packed'?{head:graph.resources.get(graph.head).format}:undefined);
         output=await runtime.read(out);
       }
-      return {head,output,geometry:g,dispatches:graph.ops.length,profile:await this.profile?.read(),workingBuffers:{created:createdBuffers,reused:reusedBuffers,prepared:!!plan,planBytes:plan?.bytes??0}};
+      if(readHead)head=await this.readActivation(live.get(graph.head),graph.resources.get(graph.head));
+      timings.completionMs=performance.now()-readbackStarted;timings.totalMs=performance.now()-started;
+      return {head,output,timings,noiseCache:{reused:noiseReused,bytes:this.noise?.buffer.size??0},geometry:g,dispatches:graph.ops.length,profile:await this.profile?.read(),workingBuffers:{created:createdBuffers,reused:reusedBuffers,prepared:!!plan,planBytes:plan?.bytes??0}};
     } finally {batch?.discard();await runtime.idle().catch(()=>{});for(const b of [...owned]){
       if(!cacheBuffer(b,old=>runtime.destroyBuffer(old)))runtime.destroyBuffer(b);
     }
-    this.workspaceBytes=poolBytes;this.profile?.dispose();this.profile=null;this.model.cache.clear();this.busy=false;}
+    this.workspaceBytes=poolBytes;this.profile?.dispose();this.profile=null;this.model.cache.clear();this.busy=false;timings.totalMs=performance.now()-started;}
   }
   async readActivation(buffer,resource) {
     const count=resource.rows*resource.channels;
@@ -172,5 +199,5 @@ export class NeuralRenderer {
     const words=await this.runtime.read(buffer,Uint32Array,resource.bytes);
     return unpackActivations(words,resource.format,count);
   }
-  dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.weightCache.clear();this.weightCacheBytes=0;this.workspace.clear();this.workspaceBytes=0;this.plan=null;this.graphCache=null;this.runtime.dispose();}
+  dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.weightCache.clear();this.weightCacheBytes=0;this.workspace.clear();this.workspaceBytes=0;this.plan=null;this.graphCache=null;this.noise=null;this.runtime.dispose();}
 }
