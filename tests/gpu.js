@@ -1,6 +1,7 @@
 import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {half,e4} from '../src/model.js';
 import {NeuralRenderer} from '../src/engine.js';
+import {dispatchGroups} from '../src/kernel-selection.js';
 const report={passed:0,failed:0,checks:[]};let runtime;
 const check=(name,ok,detail='')=>{report[ok?'passed':'failed']++;report.checks.push({name,ok,detail});};
 try {
@@ -58,11 +59,13 @@ try {
     try {
       dispatch('nr_gemm_packed',bindings,scalars,count);
       const expectedRaw=await runtime.read(bindings.raw,Uint32Array),expected=await runtime.read(bindings.output,Uint32Array);
-      runtime.write(bindings.raw,new Float32Array(count+17).fill(777));runtime.write(bindings.output,new Float32Array(count+17).fill(777));
-      const groups=Math.ceil(rows/4)*batches*Math.ceil(N/16);
-      runtime.batch().dispatch(kernels.nr_gemm_tiled.bind(bindings,scalars),[2,Math.ceil(groups/2),1]).submit();
-      const actualRaw=await runtime.read(bindings.raw,Uint32Array),actual=await runtime.read(bindings.output,Uint32Array);
-      check(`Tiled GEMM matches scalar: tails, 2D dispatch, half=${halfMode}, partition=${shape.partition}`,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===expectedRaw[i]));
+      for(const [entry,tileRows,tileCols] of [['nr_gemm_tiled',4,16],['nr_gemm_tile8x8',8,8],['nr_gemm_tile8x16',8,16]]){
+        runtime.write(bindings.raw,new Float32Array(count+17).fill(777));runtime.write(bindings.output,new Float32Array(count+17).fill(777));
+        const groups=Math.ceil(rows/tileRows)*batches*Math.ceil(N/tileCols);
+        runtime.batch().dispatch(kernels[entry].bind(bindings,scalars),[2,Math.ceil(groups/2),1]).submit();
+        const actualRaw=await runtime.read(bindings.raw,Uint32Array),actual=await runtime.read(bindings.output,Uint32Array);
+        check(entry+' matches scalar: tails, 2D dispatch, half='+halfMode+', partition='+shape.partition,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===expectedRaw[i]));
+      }
     } finally {for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
   }
   const z=runtime.createBuffer(new Float32Array(64*96)),prior=runtime.createBuffer(new Float32Array(4096)),scores=runtime.createBuffer(64*64*4),weights=runtime.createBuffer(64*64*4),inverse=runtime.createBuffer(64*4),attended=runtime.createBuffer(64*32*4);
@@ -70,6 +73,28 @@ try {
   dispatch('nr_softmax',{scores,weights,inverse},{rows:64,heads:1,keys:64,globalMode:0},64);
   dispatch('nr_attend',{qkv:z,weights,inverse,output:attended},{width:8,height:8,heads:1,shiftX:4,shiftY:4,keys:64,globalMode:0},2048);
   const attention=await runtime.read(attended);check('Shifted zero windows are finite zeros',attention.every(x=>x===0));
+  for(const [width,height,shiftX,shiftY,globalMode] of [[9,7,0,0,0],[9,7,4,4,0],[9,7,4,0,0],[9,7,0,4,0],[9,7,0,0,1],[11,7,0,0,1]]){
+    const rows=width*height,heads=2,keys=globalMode?Math.ceil(rows/64)*64:64;
+    const qkv=runtime.createBuffer(Float32Array.from({length:rows*heads*96},(_,i)=>e4((i*17)%40+8+(i%2)*128)));
+    const prior=runtime.createBuffer(Float32Array.from({length:heads*4096},(_,i)=>half(8192+i%1024)));
+    const weights=runtime.createBuffer(Float32Array.from({length:rows*heads*keys},(_,i)=>e4(8+i%24)));
+    const inverse=runtime.createBuffer(new Float32Array(rows*heads).fill(.125));
+    try {
+      for(const entry of ['nr_scores','nr_attend']){
+        const count=rows*heads*(entry==='nr_scores'?keys:32),buffer=runtime.createBuffer(new Float32Array(count+11).fill(777));
+        const scalars={width,height,heads,shiftX,shiftY,globalMode,...(entry==='nr_scores'?{padded:keys}:{keys})};
+        const bindings=entry==='nr_scores'?{qkv,prior,scores:buffer}:{qkv,weights,inverse,output:buffer};
+        try{
+          dispatch(entry,bindings,scalars,count);const expected=await runtime.read(buffer,Uint32Array);
+          runtime.write(buffer,new Float32Array(count+11).fill(777));
+          const groups=dispatchGroups(entry+'_tiled',scalars,count);
+          runtime.batch().dispatch(kernels[entry+'_tiled'].bind(bindings,scalars),[3,Math.ceil(groups/3),1]).submit();
+          const actual=await runtime.read(buffer,Uint32Array);
+          check(`${entry} tiled exact match: ${width}x${height}, shift ${shiftX}/${shiftY}, global ${globalMode}, tail guards`,actual.every((v,i)=>v===expected[i]));
+        }finally{runtime.destroyBuffer(buffer);}
+      }
+    }finally{for(const b of [qkv,prior,weights,inverse])runtime.destroyBuffer(b);}
+  }
   const nativeResponse=await fetch('../build/native/cases.json');
   if(nativeResponse.ok) {
     for(const c of await nativeResponse.json()) {
@@ -88,6 +113,12 @@ try {
             const isNaNBits=x=>(x&0x7f800000)===0x7f800000&&(x&0x007fffff)!==0;
             // NaN payloads are not portable between CUDA and WGSL.
             if(actual[i]!==expected[i]&&!(c.buffers[name].type==='float'&&isNaNBits(actual[i])&&isNaNBits(expected[i]))) {mismatches++;if(!first)first=` at ${i}: ${actual[i].toString(16)} vs ${expected[i].toString(16)}`;}
+          }
+          if(c.entry==='nr_scores'||c.entry==='nr_attend'){
+            runtime.write(bindings[name],new Float32Array(actual.length).fill(777));
+            new NeuralRenderer(runtime,kernels,{}).dispatch(c.entry,bindings,c.scalars,c.count);
+            const tiled=await runtime.read(bindings[name],Uint32Array);
+            check('Tiled attention native parity: '+c.name+'/'+name,tiled.every((v,i)=>v===expected[i]));
           }
           check('Native CUDA parity: '+c.name+'/'+name,mismatches===0,`${actual.length} words, ${mismatches} mismatches${first}`);
         }

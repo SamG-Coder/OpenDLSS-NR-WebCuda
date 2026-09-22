@@ -1,20 +1,22 @@
 import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {createGraph} from './graph.js';
 import {GpuProfile} from './gpu-profile.js';
+import {gemmKernel,dispatchGroups} from './kernel-selection.js';
 export class NeuralRenderer {
   static async create(model,options={}) {
-    const {workspaceCacheBytes=256*1024*1024,gemmMode='tiled',...runtimeOptions}=options;
+    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='tiled',...runtimeOptions}=options;
     if(!Number.isSafeInteger(workspaceCacheBytes)||workspaceCacheBytes<0)throw Error('Invalid workspace cache budget.');
-    if(!['tiled','scalar'].includes(gemmMode))throw Error('Invalid GEMM mode.');
+    if(!['auto','tiled','scalar','tile8x8','tile8x16'].includes(gemmMode))throw Error('Invalid GEMM mode.');
+    if(!['tiled','scalar'].includes(attentionMode))throw Error('Invalid attention mode.');
     const runtime=await GpuRuntime.create({useAdapterBufferLimits:true,...runtimeOptions}),kernels={};
     try {
       const response=await fetch(new URL('../generated/manifest.json',import.meta.url));if(!response.ok)throw Error('Run npm run build before starting.');
       const manifest=await response.json();
       for(const [entry,file] of Object.entries(manifest)) {const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
-      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode});
+      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode});
     } catch(e) {runtime.dispose();throw e;}
   }
-  constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='tiled'}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;}
+  constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='tiled'}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;this.attentionMode=attentionMode;}
   clearWeightCache() {
     if(this.busy)throw Error('Cancel and await inference before clearing weights.');
     for(const b of this.weightCache.values())this.runtime.destroyBuffer(b);
@@ -29,7 +31,8 @@ export class NeuralRenderer {
     this.workspace.clear();this.workspaceBytes=0;
   }
   dispatch(entry,bindings,scalars,count,batch) {
-    const groups=entry==='nr_gemm_tiled'?Math.ceil(scalars.rows/4)*scalars.batches*Math.ceil(scalars.N/16):Math.ceil(count/64),limit=this.runtime.device.limits.maxComputeWorkgroupsPerDimension;
+    if(this.attentionMode==='tiled'&&(entry==='nr_scores'||entry==='nr_attend'))entry+='_tiled';
+    const groups=dispatchGroups(entry,scalars,count),limit=this.runtime.device.limits.maxComputeWorkgroupsPerDimension;
     if(groups>limit*limit)throw Error(`${entry}: dispatch exceeds device limits.`);
     const timed=this.profile?.batch(entry,scalars);
     const commands=timed??batch??this.runtime.batch();
@@ -112,7 +115,7 @@ export class NeuralRenderer {
           }
         }
         batch??=runtime.batch();
-        this.dispatch(op.entry==='nr_gemm'&&typeof model.packedMatrix==='function'?(op.scalars.halfMode||this.gemmMode==='scalar'?'nr_gemm_packed':'nr_gemm_tiled'):op.entry,bindings,op.scalars,op.count,batch);queuedOps++;
+        this.dispatch(op.entry==='nr_gemm'&&typeof model.packedMatrix==='function'?gemmKernel(op.scalars,this.gemmMode):op.entry,bindings,op.scalars,op.count,batch);queuedOps++;
         for(const b of weights)retire(b);model.cache.clear();
         // Keep intermediates queue-ordered, and retain resources until submitted work finishes.
         // Bound both cancellation latency and transient uploads, rather than waiting every op.

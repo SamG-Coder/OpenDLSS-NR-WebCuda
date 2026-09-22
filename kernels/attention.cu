@@ -133,3 +133,97 @@ __global__ void nr_attend(const float* qkv, const float* weights, const float* i
   if (globalMode != 0) acc = nr_half(acc * inverse[row * heads + head]);
   output[i] = nr_quant(acc);
 }
+
+// Window-relative coordinates are shared by every query/key in a tile.
+__device__ int nr_window_row(unsigned natural, unsigned window, unsigned width, unsigned height, unsigned shiftX, unsigned shiftY) {
+  unsigned windowsX = (width + shiftX + 7u) / 8u;
+  int x = (int)((window % windowsX) * 8u + natural % 8u) - (int)shiftX;
+  int y = (int)((window / windowsX) * 8u + natural / 8u) - (int)shiftY;
+  return x < 0 || y < 0 || x >= (int)width || y >= (int)height ? -1 : y * (int)width + x;
+}
+__global__ void nr_scores_tiled(const float* qkv, const float* prior, float* scores, unsigned width, unsigned height, unsigned heads, unsigned shiftX, unsigned shiftY, unsigned padded, int globalMode) {
+  __shared__ float queries[128];
+  __shared__ float keyValues[512];
+  unsigned tid = threadIdx.x;
+  unsigned tile = blockIdx.x + blockIdx.y * gridDim.x;
+  unsigned rows = width * height;
+  unsigned keys = globalMode != 0 ? padded : 64u;
+  unsigned keyTiles = keys / 16u;
+  unsigned queryTiles = globalMode != 0 ? (rows + 3u) / 4u : 16u;
+  unsigned keyBase = tile % keyTiles * 16u;
+  unsigned queryBase = tile / keyTiles % queryTiles * 4u;
+  unsigned head = tile / keyTiles / queryTiles % heads;
+  unsigned window = tile / keyTiles / queryTiles / heads;
+  for (unsigned t = tid; t < 128u; t += 64u) {
+    unsigned natural = queryBase + t / 32u;
+    int row = globalMode != 0 ? (int)natural : nr_window_row(natural, window, width, height, shiftX, shiftY);
+    queries[t] = row < 0 || row >= (int)rows ? 0.0f : qkv[((unsigned)row * heads + head) * 96u + t % 32u];
+  }
+  for (unsigned t = tid; t < 512u; t += 64u) {
+    unsigned key = keyBase + t / 32u;
+    int row = globalMode != 0 ? (int)key : nr_window_row(nr_physical_to_natural(key), window, width, height, shiftX, shiftY);
+    keyValues[t] = row < 0 || row >= (int)rows ? 0.0f : qkv[((unsigned)row * heads + head) * 96u + 32u + t % 32u];
+  }
+  __syncthreads();
+  unsigned localQ = queryBase + tid / 16u;
+  unsigned key = keyBase + tid % 16u;
+  int row = globalMode != 0 ? (int)localQ : nr_window_row(localQ, window, width, height, shiftX, shiftY);
+  float acc = globalMode == 0 ? prior[(head * 64u + localQ) * 64u + key] : 0.0f;
+  for (unsigned kb = 0u; kb < 32u; kb += 16u) {
+    int e = acc != 0.0f ? nr_exp(acc, -14) : -21;
+    for (unsigned c = 0u; c < 16u; c += 1u) {
+      float a = queries[tid / 16u * 32u + kb + c];
+      float b = keyValues[tid % 16u * 32u + kb + c];
+      if (a != 0.0f && b != 0.0f) e = max(e, nr_exp(a, -6) + nr_exp(b, -6));
+    }
+    int sum = (int)truncf(acc * nr_pow2(13 - e));
+    for (unsigned c = 0u; c < 16u; c += 1u) {
+      float a = queries[tid / 16u * 32u + kb + c];
+      float b = keyValues[tid % 16u * 32u + kb + c];
+      sum += (int)truncf(a * b * nr_pow2(13 - e));
+    }
+    acc = nr_fixed_half(sum, e - 13);
+  }
+  if (row >= 0 && row < (int)rows && (globalMode == 0 || window == 0u)) scores[((unsigned)row * heads + head) * keys + key] = nr_exp_weight(acc, globalMode);
+}
+__global__ void nr_attend_tiled(const float* qkv, const float* weights, const float* inverse, float* output, unsigned width, unsigned height, unsigned heads, unsigned shiftX, unsigned shiftY, unsigned keys, int globalMode) {
+  __shared__ float tileWeights[64];
+  __shared__ float tileValues[256];
+  unsigned tid = threadIdx.x;
+  unsigned tile = blockIdx.x + blockIdx.y * gridDim.x;
+  unsigned rows = width * height;
+  unsigned queryTiles = globalMode != 0 ? (rows + 3u) / 4u : 16u;
+  unsigned channelBase = tile % 2u * 16u;
+  unsigned queryBase = tile / 2u % queryTiles * 4u;
+  unsigned head = tile / 2u / queryTiles % heads;
+  unsigned window = tile / 2u / queryTiles / heads;
+  unsigned localQ = queryBase + tid / 16u;
+  int row = globalMode != 0 ? (int)localQ : nr_window_row(localQ, window, width, height, shiftX, shiftY);
+  unsigned channel = channelBase + tid % 16u;
+  float acc = 0.0f;
+  for (unsigned kb = 0u; kb < keys; kb += 16u) {
+    tileWeights[tid] = row < 0 || row >= (int)rows ? 0.0f : weights[((unsigned)row * heads + head) * keys + kb + tid % 16u];
+    for (unsigned t = tid; t < 256u; t += 64u) {
+      unsigned key = kb + t / 16u;
+      int target = globalMode != 0 ? (int)key : nr_window_row(nr_physical_to_natural(key), window, width, height, shiftX, shiftY);
+      tileValues[t] = target < 0 || target >= (int)rows ? 0.0f : qkv[((unsigned)target * heads + head) * 96u + 64u + channelBase + t % 16u];
+    }
+    __syncthreads();
+    int e = acc != 0.0f ? nr_exp(acc, -14) : -21;
+    for (unsigned j = 0u; j < 16u; j += 1u) {
+      float a = tileWeights[tid / 16u * 16u + j];
+      float b = tileValues[j * 16u + tid % 16u];
+      if (a != 0.0f && b != 0.0f) e = max(e, nr_exp(a, -6) + nr_exp(b, -6));
+    }
+    if (isfinite(acc)) {
+      int sum = (int)truncf(acc * nr_pow2(13 - e));
+      for (unsigned j = 0u; j < 16u; j += 1u) sum += (int)truncf(tileWeights[tid / 16u * 16u + j] * tileValues[j * 16u + tid % 16u] * nr_pow2(13 - e));
+      acc = nr_fixed_half(sum, e - 13);
+    }
+    __syncthreads();
+  }
+  if (row >= 0 && row < (int)rows && (globalMode == 0 || window == 0u)) {
+    if (globalMode != 0) acc = nr_half(acc * inverse[(unsigned)row * heads + head]);
+    output[((unsigned)row * heads + head) * 32u + channel] = nr_quant(acc);
+  }
+}

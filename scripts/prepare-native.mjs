@@ -35,7 +35,8 @@ let cpp=`#include <cuda_runtime.h>\n#include <cstdio>\n#include <cstdlib>\n#incl
 const ref=await readFile(path.join(process.env.NR_NATIVE_SOURCE,'reference.cpp'),'utf8');
 cpp+='namespace original { using num::roundF16;\n'+ref.slice(ref.indexOf('int normalExponent'),ref.indexOf('uint32_t inverseTiledToken'))+ref.slice(ref.indexOf('float adaFp8Fdpa16'),ref.indexOf('float gemmFp8Element'))+ref.slice(ref.indexOf('float mpCubicSilu'),ref.indexOf('std::vector<uint16_t> siluTable'))+'}\n';
 cpp+=(await readFile('kernels/numeric.cuh','utf8')).replace(/^#pragma once\s*/m,'');
-for(const f of ['ops','gemm','attention','frame'])cpp+='\n'+(await readFile(`kernels/${f}.cu`,'utf8')).replace(/^#include "numeric.cuh"\s*/m,'');
+cpp+=(await readFile('kernels/packed.cuh','utf8')).replace(/^#pragma once\s*/m,'');
+for(const f of ['ops','gemm','attention','frame'])cpp+='\n'+(await readFile(`kernels/${f}.cu`,'utf8')).replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,'');
 cpp+='\nvoid ck(cudaError_t e){if(e!=cudaSuccess){fprintf(stderr,"%s\\n",cudaGetErrorString(e));exit(1);}}\nint main(){\n';
 for(const c of cases) {
   cpp+='{\n';const args=[];

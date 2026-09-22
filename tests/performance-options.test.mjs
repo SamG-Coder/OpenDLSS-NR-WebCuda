@@ -6,6 +6,7 @@ import {GpuProfile} from '../src/gpu-profile.js';
 test('Renderer rejects invalid cache budgets and GEMM modes before requesting a device',async()=>{
   for(const workspaceCacheBytes of [-1,NaN,Infinity,0.5])await assert.rejects(NeuralRenderer.create({}, {workspaceCacheBytes}),/cache budget/);
   await assert.rejects(NeuralRenderer.create({}, {gemmMode:'unknown'}),/GEMM mode/);
+  await assert.rejects(NeuralRenderer.create({}, {attentionMode:'unknown'}),/attention mode/);
 });
 
 test('Profiling explicitly reports unsupported timestamps without inventing GPU timings',async()=>{
