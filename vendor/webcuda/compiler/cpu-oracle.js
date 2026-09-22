@@ -5,7 +5,15 @@
  */
 import {isArray, vectorLength, vectorElement, walk} from './compiler.js';
 const f = Math.fround;
+export function roundHalf(value){
+  if(!Number.isFinite(value)||value===0)return value;
+  const sign=value<0?-1:1,x=Math.abs(value);
+  if(x>=65520)return sign*Infinity;
+  const step=2**Math.max(-24,Math.floor(Math.log2(x))-10),scaled=x/step,lower=Math.floor(scaled),fraction=scaled-lower;
+  return sign*(lower+(fraction>0.5||fraction===0.5&&lower%2!==0?1:0))*step;
+}
 function convert(value,type){
+  if(type==='f16')return roundHalf(Number(value));
   if(type==='cw_size64')return BigInt.asUintN(64,BigInt(value));
   if(type==='cw_extent')return structuredClone(value);
   if(typeof type==='string'&&type.startsWith('cw_struct_'))return structuredClone(value);
@@ -30,8 +38,8 @@ function binary(op,a,b,type){
   a=convert(a,type);b=convert(b,type);
   if(type==='cw_size64'&&op==='*')return BigInt.asUintN(64,a*b);
   switch(op){
-    case '+':return convert(a+b,type);case '-':return convert(a-b,type);case '*':return convert(['f32','cw_f64'].includes(type)?a*b:Math.imul(a,b),type);
-    case '/':if(!b&&!['f32','cw_f64'].includes(type))throw new Error('Integer division by zero.');return convert(['f32','cw_f64'].includes(type)?a/b:Math.trunc(a/b),type);
+    case '+':return convert(a+b,type);case '-':return convert(a-b,type);case '*':return convert(['f16','f32','cw_f64'].includes(type)?a*b:Math.imul(a,b),type);
+    case '/':if(!b&&!['f16','f32','cw_f64'].includes(type))throw new Error('Integer division by zero.');return convert(['f16','f32','cw_f64'].includes(type)?a/b:Math.trunc(a/b),type);
     case '%':if(!b)throw new Error('Integer remainder by zero.');return convert(a%b,type);
     case '<':return a<b;case '>':return a>b;case '<=':return a<=b;case '>=':return a>=b;case '==':return a===b;case '!=':return a!==b;
     case '&':return convert(a&b,type);case '|':return convert(a|b,type);case '^':return convert(a^b,type);
@@ -133,6 +141,9 @@ class Context {
     if(['make_uchar2','make_uchar4'].includes(name))return args.reduce((packed,v,i)=>packed|((Number(v)&255)<<(i*8)),0)>>>0;
     if(['float','int','uint','bool','uchar'].includes(name))return convert(args[0],n.type);
     if(name==='make_float3'&&Array.isArray(args[0]))return args[0].slice(0,3);
+    if(['__float2half_rn','__half2float','__half22float2','__float22half2_rn'].includes(name))return convert(args[0],n.type);
+    if(name==='__floats2half2_rn')return convert(args,n.type);
+    if(['__hmul','__hadd','__hsub','__hmul2','__hadd2','__hsub2'].includes(name))return binary(name.startsWith('__hmul')?'*':name.startsWith('__hadd')?'+':'-',args[0],args[1],n.type);
     if(name==='make_float4'&&Array.isArray(args[0]))return [...args[0],args[1]];
     if(name==='length'&&!n.userHelper)return f(Math.sqrt(args[0].reduce((sum,a)=>f(sum+f(a*a)),0)));
     if(!n.userHelper&&(name==='dot'||name==='normalize')){const sum=args[0].reduce((sum,a,i)=>f(sum+f(a*(name==='dot'?args[1][i]:a))),0);return name==='dot'?sum:args[0].map(a=>f(a/Math.sqrt(sum)));}

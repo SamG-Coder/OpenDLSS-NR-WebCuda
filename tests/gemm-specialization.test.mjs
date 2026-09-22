@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {specializedGemm,dynamicGemmScalars,gemmConstants} from '../src/gemm-specialization.js';
+import {specializedGemm,dynamicGemmScalars,gemmConstants,boundedHalfWeights} from '../src/gemm-specialization.js';
 import {specializeGemmSource} from '../scripts/specialize-gemm.mjs';
 
 test('GEMM specialization keeps rows dynamic and distinguishes every fixed argument',()=>{
@@ -24,4 +24,10 @@ test('CUDA specialization replaces only the selected entry and whole identifiers
   assert.match(result,/if\(rows > 2u\)/);
   assert.throws(()=>specializeGemmSource(source,'missing','fixed',s),/Missing/);
   assert.throws(()=>specializeGemmSource(source,'entry','fixed',{...s,K:NaN}),/Invalid/);
+});
+
+test('Half product bound checks every signed packed lane and rejects invalid inputs',()=>{
+  for(let lane=0;lane<4;lane++)for(let code=0;code<256;code++)assert.equal(boundedHalfWeights(new Uint32Array([code<<(lane*8)])),(code&127)<=81);
+  assert.equal(boundedHalfWeights(new Float32Array(4)),false);
+  assert.equal(boundedHalfWeights(new Uint32Array([0x51515151,0xd1d1d1d1])),true);
 });

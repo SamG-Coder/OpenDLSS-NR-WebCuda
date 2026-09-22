@@ -8,3 +8,10 @@ export function specializedGemm(entry,scalars) {
 export function dynamicGemmScalars(scalars) {
   return Object.fromEntries(Object.entries(scalars).filter(([key])=>!gemmConstants.includes(key)));
 }
+
+// Check original FP8 codes once when a matrix is cached. Reject NaN codes conservatively.
+export function boundedHalfWeights(words){
+  if(!(words instanceof Uint32Array))return false;
+  for(const word of words)for(let shift=0;shift<32;shift+=8)if(((word>>>shift)&127)>81)return false;
+  return true;
+}

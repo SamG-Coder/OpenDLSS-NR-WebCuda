@@ -52,6 +52,7 @@ export async function build() {
     await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));
     manifest[entry]=entry+'.json';await compact(source,entry,workgroupSize);
   }
+  const halfTemplate=await readFile('kernels/gemm-half.cu','utf8');
   const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true});
   for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
     const scalars={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
@@ -62,6 +63,13 @@ export async function build() {
     const artifact=compile(source,{entry:name,workgroupSize:base.metadata.workgroupSize});
     await writeFile('generated/'+name+'.cu',source);
     await writeFile('generated/'+name+'.json',JSON.stringify(serializableArtifact(artifact)));manifest[name]=name+'.json';
+    if(scalars.inputFormat===1){
+      const baseEntry=entry.replace('_compact',''),cols=baseEntry.endsWith('8x16')?16:8;
+      const halfCuda=header+'\n'+halfTemplate.replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace('#define NR_TILE_ROWS 4','#define NR_TILE_ROWS 8').replace('#define NR_TILE_COLS 16','#define NR_TILE_COLS '+cols).replace('#define NR_TILE_ENTRY nr_gemm_tiled','#define NR_TILE_ENTRY '+baseEntry);
+      const halfName=name+'_half',halfSource=specializeGemmSource(compactKernel(halfCuda,baseEntry,activationHeader),entry,halfName,scalars);
+      const halfArtifact=compile(halfSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:halfName,workgroupSize:base.metadata.workgroupSize});
+      await writeFile('generated/'+halfName+'.cu',halfSource);await writeFile('generated/'+halfName+'.json',JSON.stringify(serializableArtifact(halfArtifact)));manifest[halfName]=halfName+'.json';
+    }
   }
   await writeFile('generated/manifest.json',JSON.stringify(manifest,null,2));
   return manifest;

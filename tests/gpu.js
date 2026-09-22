@@ -24,6 +24,16 @@ try {
     check(`Packed GPU decoding: all ${count} ${halfMode?'half':'FP8'} patterns`,mismatches===0,`${mismatches} mismatches`);
     runtime.destroyBuffer(input);runtime.destroyBuffer(output);
   }
+  if(runtime.device.features.has('shader-f16')){
+    const pairs=[];for(let a=0;a<256;a++)if((a&127)!==127)for(let b=0;b<256;b++)if((b&127)<=81)pairs.push(e4(a),e4(b));
+    const source=`__global__ void half_products(const float* input,float* output,unsigned count){unsigned i=blockIdx.x*blockDim.x+threadIdx.x;if(i<count){float a=input[2*i]*4.0f;float b=input[2*i+1]*4.0f;__half2 p=__hmul2(__floats2half2_rn(a,b),__floats2half2_rn(b,a));float2 v=__half22float2(p);output[2*i]=v.x;output[2*i+1]=v.y;}}`;
+    const kernel=await runtime.kernel(source,{workgroupSize:[64,1,1]}),input=runtime.createBuffer(new Float32Array(pairs)),output=runtime.createBuffer(pairs.length*4),count=pairs.length/2;
+    runtime.batch().dispatch(kernel.bind({input,output},{count}),[Math.ceil(count/64),1,1]).submit();
+    const actual=await runtime.read(output);let mismatches=0;
+    for(let i=0;i<count;i++){const expected=pairs[2*i]*pairs[2*i+1]*16;if(actual[2*i]!==expected||actual[2*i+1]!==expected)mismatches++;}
+    check('Native half2: every finite E4 activation times every signed bounded weight',mismatches===0,`${count} pairs, ${mismatches} mismatches`);
+    runtime.destroyBuffer(input);runtime.destroyBuffer(output);
+  }
   const dispatch=(entry,bindings,scalars,count)=>runtime.batch().dispatch(kernels[entry].bind(bindings,scalars),[Math.ceil(count/64),1,1]).submit();
   // Separate cached noise must preserve every feature lane, including masked history and padding.
   for(const seed of [0,219,4294967295]) {
@@ -49,11 +59,13 @@ try {
       try {
         runtime.batch().dispatch(kernels.nr_gemm_packed_compact.bind(bindings,s),[Math.ceil(count/64),1,1]).submit();
         const expected=await runtime.read(bindings.output,Uint32Array),raw=await runtime.read(bindings.raw,Uint32Array);
+        for(const variant of [name,...(kernels[name+'_half']?[name+'_half']:[])]){tested.add(variant);
         runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
         // Deliberate surplus tile exercises row guards with all lanes reaching barriers.
-        runtime.batch().dispatch(kernels[name].bind(bindings,dynamicGemmScalars(s)),[dispatchGroups(base,s,count)+1,1,1]).submit();
+        runtime.batch().dispatch(kernels[variant].bind(bindings,dynamicGemmScalars(s)),[dispatchGroups(base,s,count)+1,1,1]).submit();
         const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
-        check('Specialized GEMM tail and publication: '+name,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]));
+        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]));
+        }
       }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
     }
     check('Every built specialization is covered',Object.keys(kernels).filter(k=>/_compact_s[0-9]/.test(k)).every(k=>tested.has(k)));

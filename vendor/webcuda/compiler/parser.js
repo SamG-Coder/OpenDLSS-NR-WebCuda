@@ -15,9 +15,9 @@ export class CompileError extends Error {
 const NUM = /^(?:0[xX][\da-fA-F]+(?:[uU][lL]?|[lL][uU])?|(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?(?:[uU][lL]?|[lL][uU]|[fF])?)/;
 const WORD = /^[A-Za-z_]\w*/;
 const OPERATORS = ['<<<', '>>>', '<<=', '>>=', '::', '++', '--', '+=', '-=', '*=', '/=', '%=', '==', '!=', '<=', '>=', '&&', '||', '<<', '>>', '&=', '|=', '^=', '->'];
-const TYPES = new Set(['float', 'int', 'uint', 'unsigned', 'bool', 'void', 'float2', 'float3', 'float4']);
+const TYPES = new Set(['__half','__half2','float', 'int', 'uint', 'unsigned', 'bool', 'void', 'float2', 'float3', 'float4']);
 const QUALIFIERS = new Set(['const', '__shared__', '__restrict__', '__restrict', 'restrict','extern']);
-const MAP = { float: 'f32', int: 'i32', uint: 'u32', bool: 'bool', void: 'void', float2: 'vec2<f32>', float3: 'vec3<f32>', float4: 'vec4<f32>' };
+const MAP = { __half:'f16',__half2:'vec2<f16>', float: 'f32', int: 'i32', uint: 'u32', bool: 'bool', void: 'void', float2: 'vec2<f32>', float3: 'vec3<f32>', float4: 'vec4<f32>' };
 TYPES.add('uchar');MAP.uchar='cw_uchar';
 TYPES.add('short');MAP.short='cw_short';TYPES.add('ushort');MAP.ushort='cw_ushort';
 TYPES.add('uchar4');MAP.uchar4='cw_uchar4';

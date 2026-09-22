@@ -171,6 +171,8 @@ npm run benchmark
 
 Results are written to ignored `reports/performance.json`. Set `NR_REPORT` to save another report and `NR_COMPARE` to a baseline report to require matching network-head and final-output SHA-256 hashes. Set `NR_SPECIALIZE=0` to disable GEMM specialization. Set `NR_INFLIGHT=1` for one graph batch in flight, `NR_NOISE_CACHE=0` to disable the noise cache, or `NR_READ_HEAD=0` to omit head download. Set `NR_PROFILE=1` for GPU timing, `NR_GEMM=scalar|tiled|tile8x8|tile8x16|auto` to select matrix kernels, `NR_ATTENTION=scalar|tiled|fused` to select attention kernels, `NR_BATCH=8` to restore smaller prepared batches, `NR_ACTIVATIONS=float|packed` to select activation storage, `NR_EXECUTION=streamed|prepared` to select scheduling, or `NR_WORKSPACE_MIB=0` to disable the buffer pool. `NR_CAPTURE=1` records hashes for all 75 intermediate capture points; when the baseline contains those hashes, `NR_COMPARE` checks them too. Compare on the same hardware and browser, and use profiling-disabled runs for frame-speed comparisons. The benchmark uses a generated gradient and never distributes the DLL or its tensors.
 
+Native half GEMMs are enabled by default (`nativeHalf: true`) when `shader-f16` is available. Each cached FP8 matrix is checked once for decoded magnitudes no greater than 9. Eligible packed-input GEMMs use paired half products and shared operand exponents, retaining the existing F13 accumulation and output publication. Unsupported devices, matrices outside the bound, and other GEMM configurations use the original path. Use `nativeHalf: false` or `NR_HALF=0` with `npm run benchmark` to disable it. Set `NR_HALF=1` with `npm run benchmark:execution` for an isolated off/on comparison. See [measured results and exactness checks](reports/performance-half.md).
+
 ## WebCuda change
 
 WebCuda is vendored under `vendor/webcuda` so a checkout is self-contained. The vendored compiler includes this change developed against WebCuda:
@@ -180,6 +182,8 @@ WebCuda is vendored under `vendor/webcuda` so a checkout is self-contained. The 
 It adds `__float_as_uint`, `__uint_as_float`, `__float_as_int`, and `__int_as_float` to the compiler and CPU oracle, with argument validation and regression tests. The patch is in `patches/`. Its full existing test suite passed: **762 tests**. The original development commit is identified here for provenance; its patch is included.
 
 `0b581fb` — **Allow callers to request adapter-sized storage buffers** adds the explicit `useAdapterBufferLimits` runtime option. NR enables it; other WebCuda callers retain their previous defaults. The change is included in the vendored runtime and as patch 0002. The updated WebCuda suite passed **765 tests**.
+
+Native local/shared `__half` and `__half2` support is synced from WebCuda commit `5aa80e3`, pushed to its own repository. That upstream history also contains the two earlier patches as `390f6c1` and `166056c`. Validation: 768 host tests, existing kernel compilation, and 41,656 exact GPU half-product pairs. Kernel half storage-buffer parameters are outside the supported subset.
 
 ## Provenance and license
 
