@@ -12,6 +12,18 @@ export function roundHalf(value){
   const step=2**Math.max(-24,Math.floor(Math.log2(x))-10),scaled=x/step,lower=Math.floor(scaled),fraction=scaled-lower;
   return sign*(lower+(fraction>0.5||fraction===0.5&&lower%2!==0?1:0))*step;
 }
+function decodeHalf(bits){
+  const sign=bits&32768?-1:1,exponent=(bits>>>10)&31,mantissa=bits&1023;
+  return exponent===31?(mantissa?NaN:sign*Infinity):exponent?sign*(1024+mantissa)*2**(exponent-25):sign*mantissa*2**-24;
+}
+function encodeHalf(value){
+  const rounded=roundHalf(value),sign=rounded<0||Object.is(rounded,-0)?32768:0,magnitude=Math.abs(rounded);
+  if(Number.isNaN(rounded))return 32256;
+  if(!Number.isFinite(rounded))return sign|31744;
+  if(magnitude<2**-14)return sign|Math.round(magnitude*2**24);
+  const exponent=Math.floor(Math.log2(magnitude));
+  return sign|((exponent+15)<<10)|Math.round((magnitude/2**exponent-1)*1024);
+}
 function convert(value,type){
   if(type==='f16')return roundHalf(Number(value));
   if(type==='cw_size64')return BigInt.asUintN(64,BigInt(value));
@@ -27,10 +39,15 @@ function convert(value,type){
 }
 function zero(type,structs=[]){const spec=structs.find(s=>s.type===type);if(spec)return Object.fromEntries(spec.fields.map(f=>[f.name,zero(f.resolvedType,structs)]));if(isArray(type))return Array.from({length:type.length},()=>zero(type.element,structs));const n=vectorLength(type);return n?Array(n).fill(0):type==='bool'?false:0;}
 class BufferView {
-  constructor(data,type,offset=0){this.data=data;this.type=type;this.offset=offset;this.records=Array.isArray(data);this.width=this.records?1:vectorLength(type)||1;this.length=data.length/this.width;if(!Number.isInteger(this.length))throw new Error('Buffer record count is not integral.');}
+  constructor(data,type,offset=0){this.data=data;this.type=type;this.offset=offset;this.records=Array.isArray(data);this.width=this.records?1:vectorLength(type)||1;
+    if(!this.records&&vectorElement(type)==='f16'){
+      if(data.byteLength%(this.width*2))throw new Error('Half CPU buffers require complete binary16 records.');
+      this.halfView=new DataView(data.buffer,data.byteOffset,data.byteLength);this.length=data.byteLength/(this.width*2);
+    }else this.length=data.length/this.width;
+    if(!Number.isInteger(this.length))throw new Error('Buffer record count is not integral.');}
   check(i){if(!Number.isInteger(i)||i+this.offset<0||i+this.offset>=this.length)throw new RangeError(`CPU oracle detected out-of-bounds access at ${i}, offset ${this.offset}, length ${this.length}.`);}
-  get(i){this.check(i);i+=this.offset;return this.records?structuredClone(this.data[i]):this.width===1?(this.type==='bool'?!!this.data[i]:this.data[i]):Array.from(this.data.subarray(i*this.width,(i+1)*this.width));}
-  set(i,v){this.check(i);i+=this.offset;if(this.width===1)this.data[i]=convert(v,this.type);else this.data.set(convert(v,this.type),i*this.width);}
+  get(i){this.check(i);i+=this.offset;if(this.halfView)return this.width===1?decodeHalf(this.halfView.getUint16(i*2,true)):Array.from({length:this.width},(_,lane)=>decodeHalf(this.halfView.getUint16((i*this.width+lane)*2,true)));return this.records?structuredClone(this.data[i]):this.width===1?(this.type==='bool'?!!this.data[i]:this.data[i]):Array.from(this.data.subarray(i*this.width,(i+1)*this.width));}
+  set(i,v){this.check(i);i+=this.offset;if(this.halfView){const values=this.width===1?[v]:v;for(let lane=0;lane<this.width;lane++)this.halfView.setUint16((i*this.width+lane)*2,encodeHalf(values[lane]),true);return;}if(this.width===1)this.data[i]=convert(v,this.type);else this.data.set(convert(v,this.type),i*this.width);}
 }
 function binary(op,a,b,type){
   if(vectorLength(type))return Array.from({length:vectorLength(type)},(_,i)=>binary(op,Array.isArray(a)?a[i]:a,Array.isArray(b)?b[i]:b,vectorElement(type)));

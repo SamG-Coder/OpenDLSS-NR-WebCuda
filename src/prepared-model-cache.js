@@ -22,24 +22,32 @@ export async function hashModelTensors(model,onProgress=()=>{}) {
 }
 
 function recordHeader(record) {
-  return [record.schema,record.formatVersion,record.modelHash,record.matrixKey,
+  const header=[record.schema,record.formatVersion,record.modelHash,record.matrixKey,
     record.K,record.N,record.batches,record.boundedHalf,record.payloadWordLength,
     record.metadataWordOffset,record.metadataByteLength,record.wordsSha256];
+  // Leave existing FP8 records byte-for-byte compatible while authenticating the
+  // interpretation of every explicitly named layout.
+  if(record.layout!==undefined)header.push(record.layout);
+  return header;
 }
 
-export async function createPreparedRecord(descriptor,{modelHash,matrixKey,formatVersion}) {
+export async function createPreparedRecord(descriptor,{modelHash,matrixKey,formatVersion,layout}) {
   const {K,N,batches,boundedHalf,payloadWordLength,metadataWordOffset,metadataByteLength,words}=descriptor;
   const record={schema:SCHEMA,formatVersion,modelHash,matrixKey,K,N,batches,boundedHalf,
     payloadWordLength,metadataWordOffset,metadataByteLength,words,
     wordsSha256:await sha256(new Uint8Array(words.buffer,words.byteOffset,words.byteLength))};
+  if(layout!==undefined)record.layout=layout;
   record.integritySha256=await sha256(encoder.encode(JSON.stringify(recordHeader(record))));
   return record;
 }
 
-export async function validatePreparedRecord(record,{modelHash,matrixKey,formatVersion,K,N,batches}) {
+export async function validatePreparedRecord(record,{modelHash,matrixKey,formatVersion,K,N,batches,layout}) {
   try {
-    const values=K*N*batches,payloadWordLength=values/4,metadataByteLength=values/16;
+    if(layout!==undefined&&layout!=='half-operands-v1')return null;
+    const values=K*N*batches,precomputed=layout==='half-operands-v1';
+    const payloadWordLength=precomputed?values/2:values/4,metadataByteLength=precomputed?values*2:values/16;
     if(!record||record.schema!==SCHEMA||record.formatVersion!==formatVersion||record.modelHash!==modelHash||record.matrixKey!==matrixKey||
+      record.layout!==layout||
       record.K!==K||record.N!==N||record.batches!==batches||typeof record.boundedHalf!=='boolean'||
       record.payloadWordLength!==payloadWordLength||record.metadataWordOffset!==payloadWordLength||record.metadataByteLength!==metadataByteLength||
       !(record.words instanceof Uint32Array)||record.words.length!==payloadWordLength+metadataByteLength/4||

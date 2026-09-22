@@ -6,6 +6,7 @@ import {half,e4,unpackActivations} from '../src/model.js';
 import {NeuralRenderer} from '../src/engine.js';
 import {dispatchGroups} from '../src/kernel-selection.js';
 import {prepareMatrix} from '../src/model-preparation.js';
+import {precomputeMatrix} from '../src/precomputed-model.js';
 const report={passed:0,failed:0,checks:[]};let runtime;
 const check=(name,ok,detail='')=>{report[ok?'passed':'failed']++;report.checks.push({name,ok,detail});};
 try {
@@ -51,8 +52,8 @@ try {
     for(const buffer of [proxy,history,noise,reference,cached])runtime.destroyBuffer(buffer);
   }
   {
-    const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true}),tested=new Set();
-    let testedIntegerRange=false;
+    const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true}),tested=new Set(),precomputedExpected=new Set();
+    let testedIntegerRange=false,specializationCount=0;
     const metadata=runtime.createBuffer(2048),siluTable=runtime.createBuffer(262144);
     runtime.batch().dispatch(kernels.nr_lookup_tables.bind({metadata,silu:siluTable}),[1024,1,1]).submit();
     const packed=(count,format)=>{const lanes=format===1?4:2,bits=format===1?8:16,a=new Uint32Array(Math.ceil(count/lanes));for(let i=0;i<count;i++)a[Math.floor(i/lanes)]|=(format===1?(24+(i*17)%48)|(i%3?0:128):0x3000+(i%31)|(i%3?0:32768))<<((i%lanes)*bits);return a;};
@@ -68,10 +69,10 @@ try {
     };
     for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
       const s={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
-      const base=gemmKernel(s),name=specializedGemm(base+'_compact',s);if(!name||tested.has(name))continue;tested.add(name);
+      const base=gemmKernel(s),name=specializedGemm(base+'_compact',s);if(!name||tested.has(name))continue;tested.add(name);specializationCount++;
       // Cross a 64-row boundary and leave a partial 64-column tile in the small QKV case.
       s.rows=s.K===32&&s.N===96?65:9;
-      const weightWords=weightFixture(s),preparedWeights=runtime.createBuffer(prepareMatrix(weightWords,s).words);
+      const weightWords=weightFixture(s),preparedWeights=runtime.createBuffer(prepareMatrix(weightWords,s).words),precomputedWeights=runtime.createBuffer(precomputeMatrix(weightWords,s).words);
       const inputWords=packed(s.rows*s.inputStride,s.inputFormat);
       if(s.inputFormat===1)for(let i=0;i<s.rows*s.inputStride;i++){
         const code=i%16===0?80:i%16===15?0:(8+i%7)|(i%3?0:128),shift=(i&3)*8;
@@ -86,15 +87,20 @@ try {
           {name:name+'_wide64x32_half',rows:64,cols:32},
           {name:name+'_wide32x64_half',rows:32,cols:64},
           {name:name+'_prepared_half',rows:32,cols:32,prepared:true},
-          {name:name+'_prepared_integer',rows:32,cols:32,prepared:true}];
-        for(const {name:variant,rows:tileRows,cols:tileCols,prepared} of variants.filter(v=>kernels[v.name])){tested.add(variant);
+          {name:name+'_prepared_integer',rows:32,cols:32,prepared:true},
+          {name:name+'_precomputed_half',rows:32,cols:32,precomputed:true},
+          {name:name+'_precomputed64x32_half',rows:64,cols:32,precomputed:true},
+          {name:name+'_precomputed32x64_half',rows:32,cols:64,precomputed:true}];
+        for(const variant of variants)if(variant.precomputed)precomputedExpected.add(variant.name);
+        for(const {name:variant,rows:tileRows,cols:tileCols,prepared,precomputed} of variants.filter(v=>kernels[v.name])){tested.add(variant);
         runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
         // Deliberate surplus tile exercises row guards with all lanes reaching barriers.
         const groups=tileRows?Math.ceil(s.rows/tileRows)*s.batches*Math.ceil(s.N/tileCols):dispatchGroups(base,s,count);
-        const variantBindings=tileRows?{...bindings,metadata,siluTable,...(prepared?{weights:preparedWeights}:{})}:bindings;
-        runtime.batch().dispatch(kernels[variant].bind(variantBindings,dynamicGemmScalars(s)),[groups+1,1,1]).submit();
+        const variantBindings=tileRows?{...bindings,metadata,siluTable,...(precomputed?{weights:precomputedWeights}:prepared?{weights:preparedWeights}:{})}:bindings;
+        const grid=precomputed?[2,Math.ceil((groups+1)/2),1]:[groups+1,1,1];
+        runtime.batch().dispatch(kernels[variant].bind(variantBindings,dynamicGemmScalars(s)),grid).submit();
         const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
-        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]),`${s.rows} rows, ${s.N} columns, ${s.batches} batches; exponent metadata cases, output and raw guards included`);
+        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]),`${s.rows} rows, ${s.N} columns, ${s.batches} batches; ${precomputed?'precomputed value/exponent planes and 2D surplus groups':'exponent metadata cases'}, output and raw guards included`);
         }
         if(!testedIntegerRange&&s.K===32&&s.N===96&&kernels[name+'_prepared_integer']){
           testedIntegerRange=true;
@@ -114,9 +120,10 @@ try {
           const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
           check('Prepared integer GEMM: full finite FP8 range, overflow publication, 2D surplus groups and guards',actual.every((v,i)=>v===reference[i])&&actualRaw.every((v,i)=>v===referenceRaw[i]));
         }
-      }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);runtime.destroyBuffer(preparedWeights);}
+      }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);runtime.destroyBuffer(preparedWeights);runtime.destroyBuffer(precomputedWeights);}
     }
     check('Every built specialization is covered',Object.keys(kernels).filter(k=>/_compact_s[0-9]/.test(k)).every(k=>tested.has(k)));
+    check('All three precomputed tiles are built and tested for every specialization',specializationCount>0&&precomputedExpected.size===specializationCount*3&&[...precomputedExpected].every(entry=>tested.has(entry)),`${precomputedExpected.size} expected precomputed variants across ${specializationCount} specializations`);
     runtime.destroyBuffer(metadata);runtime.destroyBuffer(siluTable);
   }
   {

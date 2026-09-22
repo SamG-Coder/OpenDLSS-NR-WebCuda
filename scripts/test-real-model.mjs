@@ -4,7 +4,7 @@ import {createServer} from './serve.mjs';
 const width=Number(process.env.NR_WIDTH||33),height=Number(process.env.NR_HEIGHT||33);
 const gemmBackend=process.env.NR_GEMM_BACKEND||'half';
 if(![width,height].every(n=>Number.isInteger(n)&&n>=33))throw Error('Invalid NR_WIDTH/NR_HEIGHT');
-if(!['half','prepared-half','prepared-integer'].includes(gemmBackend))throw Error('Invalid NR_GEMM_BACKEND');
+if(!['half','prepared-half','prepared-integer','precomputed-half'].includes(gemmBackend))throw Error('Invalid NR_GEMM_BACKEND');
 if(!process.env.NR_DLL)throw Error('Set NR_DLL to your nvngx_dlssnr.dll');
 const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));let browser;
 try {

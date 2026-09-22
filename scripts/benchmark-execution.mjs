@@ -6,13 +6,14 @@ const runs=Number(process.env.NR_RUNS||6);
 if(!Number.isSafeInteger(runs)||runs<2||runs>100)throw Error('NR_RUNS must be an integer from 2 to 100.');
 const gemmBackend=process.env.NR_GEMM_BACKEND||'half',baselineGemmBackend=process.env.NR_BASELINE_GEMM_BACKEND||'half';
 const compareBackends=Boolean(process.env.NR_GEMM_BACKEND||process.env.NR_BASELINE_GEMM_BACKEND);
-for(const backend of [gemmBackend,baselineGemmBackend])if(!['half','prepared-half','prepared-integer'].includes(backend))throw Error('GEMM backend must be half, prepared-half, or prepared-integer.');
+for(const backend of [gemmBackend,baselineGemmBackend])if(!['half','prepared-half','prepared-integer','precomputed-half'].includes(backend))throw Error('GEMM backend must be half, prepared-half, prepared-integer, or precomputed-half.');
 if(compareBackends&&(process.env.NR_PREVIOUS_GENERATED||process.env.NR_PREVIOUS_ENGINE))throw Error('Backend comparisons require the same current generated shaders and renderer for both modes.');
 if(!process.env.NR_DLL)throw Error('Set NR_DLL to a local compatible DLL.');
 const server=createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));let browser;
 try {
   browser=await chromium.launch({headless:true,...(process.env.NR_BROWSER?{executablePath:process.env.NR_BROWSER}:{}),args:['--enable-unsafe-webgpu']});
   const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  page.on('console',message=>{if(message.text().startsWith('NR benchmark:'))console.log(message.text());});
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.evaluate(()=>{const input=document.createElement('input');input.type='file';input.id='local-model';document.body.append(input);});
   await page.locator('#local-model').setInputFiles(process.env.NR_DLL);
@@ -26,12 +27,15 @@ try {
     const hash=async a=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',a)),v=>v.toString(16).padStart(2,'0')).join('');
     const cases=[];
     for(const [width,height] of [[1280,720],[1920,1080]]) {
+      console.log(`NR benchmark: ${width}x${height}, preparing baseline ${baselineGemmBackend}.`);
       const setupStarted=performance.now();
       const originalFetch=globalThis.fetch;
       if(previousGenerated)globalThis.fetch=(url,...args)=>{const target=new URL(url,location.href);if(target.origin===location.origin&&target.pathname.startsWith('/generated/'))target.pathname='/'+previousGenerated.replace(/^\/+|\/+$/g,'')+'/'+target.pathname.slice('/generated/'.length);return originalFetch(target,...args);};
       let baseline;
       try { baseline=await BaselineRenderer.create(model,compareBackends?{gemmBackend:baselineGemmBackend,gemmTile,specializeGemm:true,nativeHalf,wideGemm,normalizeAttention}:previousGenerated?{gemmTile:'32x32',nativeHalf:true,wideGemm:true,normalizeAttention:true}:enhanced?{nativeHalf:true,wideGemm:false,normalizeAttention:false}:normalizeAttention?{nativeHalf:true,wideGemm:true,normalizeAttention:false}:wideGemm?{nativeHalf:true,wideGemm:false,normalizeAttention:false}:nativeHalf?{nativeHalf:false,wideGemm:false,normalizeAttention:false}:specialization?{specializeGemm:false,nativeHalf:false,wideGemm:false,normalizeAttention:false}:{maxInFlightBatches:1,cacheNoise:false,nativeHalf:false,wideGemm:false,normalizeAttention:false}); }finally{globalThis.fetch=originalFetch;}const baselineSetupMs=performance.now()-setupStarted;
+      console.log(`NR benchmark: baseline setup ${(baselineSetupMs/1000).toFixed(2)} s; preparing candidate ${gemmBackend}.`);
       const candidateStarted=performance.now(),candidate=await NeuralRenderer.create(model,{gemmBackend,gemmTile,specializeGemm:true,nativeHalf,wideGemm,normalizeAttention}),candidateSetupMs=performance.now()-candidateStarted;
+      console.log(`NR benchmark: candidate setup ${(candidateSetupMs/1000).toFixed(2)} s; warmup and ${runs} alternating samples per renderer.`);
       const engines=[baseline,candidate],samples=[[],[]];
       const proxy=Float32Array.from({length:width*height*4},(_,i)=>{const p=i>>2;return i%4===3?1:i%4===0?(p%width)/(width-1):i%4===1?Math.floor(p/width)/(height-1):0.4;});
       let expected,adapter,preparation;
@@ -48,6 +52,7 @@ try {
         preparation=engines.map(engine=>engine.preparedModel?{...engine.preparedModel.stats}:null);
       }finally{engines.forEach(e=>e.dispose());}
       cases.push({width,height,baselineGemmBackend,candidateGemmBackend:gemmBackend,baselineSetupMs,candidateSetupMs,preparation,outputHash:expected,adapter,baseline:samples[0],candidate:samples[1]});
+      console.log(`NR benchmark: ${width}x${height} complete; every output hash matched.`);
     }
     return cases;
   },configuration);

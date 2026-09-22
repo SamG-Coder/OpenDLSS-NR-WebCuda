@@ -1,6 +1,8 @@
 import {wideTiles,wideTileForEntry,selectWideGemm,wideDispatchGroups} from './gemm-tiles.js';
 import {preparedBackendForEntry,supportsPreparedBackend,preparedGemmEntry} from './prepared-gemm.js';
 import {prepareModel,preparedMatrixKey,PREPARED_FORMAT_VERSION} from './model-preparation.js';
+import {precomputeModel} from './precomputed-model.js';
+import {precomputedTileForEntry,selectPrecomputedGemm} from './precomputed-gemm.js';
 import {specializedGemm,dynamicGemmScalars,boundedHalfWeights} from './gemm-specialization.js';
 import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {createGraph} from './graph.js';
@@ -12,7 +14,7 @@ import {gemmKernel,dispatchGroups,dispatchGrid} from './kernel-selection.js';
 export class NeuralRenderer {
   static async create(model,options={}) {
     const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,maxInFlightBatches=4,cacheNoise=true,specializeGemm=true,nativeHalf=true,wideGemm=true,gemmTile='auto',normalizeAttention=true,gemmBackend='half',modelCache=true,onPrepareProgress=()=>{},...runtimeOptions}=options;
-    if(!['half','prepared-half','prepared-integer'].includes(gemmBackend))throw Error('Invalid GEMM backend.');
+    if(!['half','prepared-half','prepared-integer','precomputed-half'].includes(gemmBackend))throw Error('Invalid GEMM backend.');
     if(typeof modelCache!=='boolean'||typeof onPrepareProgress!=='function')throw Error('Invalid model preparation options.');
     if(gemmBackend!=='half'&&(!specializeGemm||activationStorage!=='packed'||!['auto','tile8x8','tile8x16'].includes(gemmMode)))throw Error('Prepared GEMM backends require packed activations and GEMM specialization in auto, tile8x8 or tile8x16 mode.');
     if(!Number.isInteger(maxInFlightBatches)||maxInFlightBatches<1||maxInFlightBatches>8)throw Error('In-flight batch limit must be 1 through 8.');
@@ -35,6 +37,8 @@ export class NeuralRenderer {
       for(const [entry,file] of Object.entries(manifest)) {
         const preparedBackend=preparedBackendForEntry(entry);
         if(preparedBackend&&(preparedBackend!==gemmBackend||!supportsPreparedBackend(preparedBackend,runtime.device)||(preparedBackend==='prepared-half'&&!nativeHalf)))continue;
+        const precomputedTile=precomputedTileForEntry(entry);
+        if(precomputedTile&&(gemmBackend!=='precomputed-half'||selectPrecomputedGemm(entry.slice(0,-precomputedTile.suffix.length),manifest,runtime.device.limits,gemmTile)?.entry!==entry))continue;
         if(entry==='nr_lookup_tables'&&!wideGemm&&gemmBackend==='half')continue;
         if(entry==='nr_local_attention_normalized'&&(!normalizeAttention||!runtime.device.features.has('shader-f16')||runtime.device.limits.maxComputeWorkgroupStorageSize<31680||runtime.device.limits.maxComputeInvocationsPerWorkgroup<512||runtime.device.limits.maxComputeWorkgroupSizeX<512||activationStorage!=='packed'||attentionMode!=='fused'))continue;
         const tile=wideTileForEntry(entry);
@@ -45,7 +49,8 @@ export class NeuralRenderer {
         const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
       const engine=new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize,maxInFlightBatches,cacheNoise,specializeGemm,nativeHalf,wideGemm,gemmTile,normalizeAttention});
       engine.gemmBackend=gemmBackend;
-      if(Object.keys(kernels).some(entry=>preparedBackendForEntry(entry)))engine.preparedModel=await prepareModel(model,{cache:modelCache,onProgress:onPrepareProgress});
+      if(Object.keys(kernels).some(entry=>precomputedTileForEntry(entry)))engine.preparedModel=await precomputeModel(model,{cache:modelCache,onProgress:onPrepareProgress});
+      else if(Object.keys(kernels).some(entry=>preparedBackendForEntry(entry)))engine.preparedModel=await prepareModel(model,{cache:modelCache,onProgress:onPrepareProgress});
       return engine;
     } catch(e) {runtime.dispose();throw e;}
   }
@@ -82,17 +87,18 @@ export class NeuralRenderer {
     if(bindings.weights?.preparedBackend&&!this.specializeGemm)throw Error('Prepared weights cannot use an unspecialized GEMM.');
     if(this.specializeGemm){const specialized=specializedGemm(entry,scalars);if(specialized&&this.kernels[specialized]){
       if(bindings.weights?.preparedBackend){
-        entry=preparedGemmEntry(specialized,bindings.weights.preparedBackend);
+        const selected=bindings.weights.preparedBackend==='precomputed-half'?selectPrecomputedGemm(specialized,this.kernels,this.runtime.device.limits,this.gemmTile):null;
+        entry=bindings.weights.preparedBackend==='precomputed-half'?selected?.entry:preparedGemmEntry(specialized,bindings.weights.preparedBackend);
         if(!this.kernels[entry])throw Error('Prepared weights require a matching GEMM pipeline.');
-        groups=wideDispatchGroups(wideTiles['32x32'],scalars);
+        groups=wideDispatchGroups(selected?.tile??wideTiles['32x32'],scalars);
       }else{
         entry=this.nativeHalf&&bindings.weights?.boundedHalf&&this.kernels[specialized+'_half']?specialized+'_half':specialized;
         if(this.wideGemm&&entry.endsWith('_half')){const selected=selectWideGemm(specialized,this.kernels,this.runtime.device.limits,this.gemmTile);if(selected){entry=selected.entry;groups=wideDispatchGroups(selected.tile,scalars);}}
       }
       scalars=dynamicGemmScalars(scalars);
     }else if(bindings.weights?.preparedBackend)throw Error('Prepared weights cannot use an unspecialized GEMM.');}
-    if(this.gemmDispatches&&entry.startsWith('nr_gemm'))this.gemmDispatches[preparedBackendForEntry(entry)?'prepared':'fallback']++;
-    if(wideTileForEntry(entry)||preparedBackendForEntry(entry)){
+    if(this.gemmDispatches&&entry.startsWith('nr_gemm'))this.gemmDispatches[preparedBackendForEntry(entry)||precomputedTileForEntry(entry)?'prepared':'fallback']++;
+    if(wideTileForEntry(entry)||preparedBackendForEntry(entry)||precomputedTileForEntry(entry)){
       if(!this.lookup){
         const metadata=this.runtime.createBuffer(256*8),siluTable=this.runtime.createBuffer(65536*4);
         this.runtime.batch().dispatch(this.kernels.nr_lookup_tables.bind({metadata,silu:siluTable}),[1024,1,1]).submit();
@@ -198,15 +204,20 @@ export class NeuralRenderer {
         if(signal?.aborted)throw new DOMException('Inference cancelled','AbortError');
         const op=graph.ops[index],bindings={},weights=[];
         const formats=this.activationStorage==='packed'?Object.fromEntries(Object.entries(op.bindings).filter(([,id])=>typeof id==='string').map(([key,id])=>[key,graph.resources.get(id).format])):undefined;
-        const preparedEntry=this.preparedModel&&this.specializeGemm&&this.activationStorage==='packed'&&(this.gemmBackend!=='prepared-half'||this.nativeHalf)&&op.entry==='nr_gemm'?preparedGemmEntry(specializedGemm(gemmKernel(op.scalars,this.gemmMode)+'_compact',{...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',formats?.[key]??0]))}),this.gemmBackend):null;
+        const requiresHalf=this.gemmBackend==='prepared-half'||this.gemmBackend==='precomputed-half';
+        let preparedEntry=null;
+        if(this.preparedModel&&this.specializeGemm&&this.activationStorage==='packed'&&(!requiresHalf||this.nativeHalf)&&op.entry==='nr_gemm'){
+          const base=specializedGemm(gemmKernel(op.scalars,this.gemmMode)+'_compact',{...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',formats?.[key]??0]))});
+          preparedEntry=this.gemmBackend==='precomputed-half'?selectPrecomputedGemm(base,this.kernels,runtime.device.limits,this.gemmTile)?.entry:preparedGemmEntry(base,this.gemmBackend);
+        }
         for(const [key,spec] of Object.entries(op.bindings)) {
           if(typeof spec==='string') {if(!live.has(spec))live.set(spec,plan?.resources.get(spec)??take(graph.resources.get(spec).bytes));bindings[key]=live.get(spec);}
           else if(spec.kind==='zero')bindings[key]=zero;
           else {
             const persistent=typeof model.packedMatrix==='function';
             const candidate=key==='weights'&&spec.kind==='matrix'&&preparedEntry&&this.kernels[preparedEntry]?this.preparedModel.matrices.get(preparedMatrixKey(spec)):null;
-            const prepared=candidate&&(this.gemmBackend!=='prepared-half'||candidate.boundedHalf)?candidate:null;
-            const cacheKey=(prepared?'prepared-v'+PREPARED_FORMAT_VERSION+':'+this.gemmBackend+':':'')+JSON.stringify(spec);
+            const prepared=candidate&&(!requiresHalf||candidate.boundedHalf)?candidate:null;
+            const cacheKey=(prepared?'prepared-v'+(this.preparedModel.formatVersion??PREPARED_FORMAT_VERSION)+':'+this.gemmBackend+':':'')+JSON.stringify(spec);
             const cached=persistent&&this.weightCache.get(cacheKey);
             if(cached){bindings[key]=cached;continue;}
             let data;

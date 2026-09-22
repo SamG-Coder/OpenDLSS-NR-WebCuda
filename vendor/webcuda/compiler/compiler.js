@@ -1125,7 +1125,7 @@ class Emitter {
     for(const s of this.structs.values())header.push(`struct ${s.type} {`,...s.fields.map(f=>`  cw_field_${f.name}: ${typeName(f.resolvedType)},`),'}');
     const sharedAtomicType = t => isArray(t) ? `array<${sharedAtomicType(t.element)}, ${t.length}>` : `atomic<${t==='f32'?'u32':t}>`;
     for (const p of [...this.kernel.params,...this.deviceParams]) {
-      if(vectorElement(p.type)==='f16')this.fail('Half kernel parameters are unsupported; use local/shared half values with float or packed integer buffers.',p);
+      if(vectorElement(p.type)==='f16'&&!p.pointer)this.fail('Half kernel parameters passed by value are unsupported; use half storage pointers or local/shared half values.',p);
       const imported=this.objectImports.find(i=>i.name===p.name);if(imported&&p.pointer){const symbol={name:p.name,rootBufferName:p.name,type:arrayOf(p.type),code:'cw_import_'+imported.id,constant:p.constant,atomic:false,kind:'buffer',objectImport:imported,...(shiftedPointers(this.kernel).has(p.name)||this.launchConsumer?.buffers.some(b=>b.name===p.name)?{offsetCode:'cw_pointer_'+p.name}:{})};this.add(p.name,symbol,p,true);p.symbol=symbol;this.bufferSymbols.set(p.name,symbol);continue;}
       if (p.shared || p.reference || p.external || p.type === 'void') this.fail('Invalid kernel parameter type.', p);
       if(!p.pointer&&this.structs.has(p.type)){
