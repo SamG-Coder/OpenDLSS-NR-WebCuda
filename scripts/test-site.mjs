@@ -12,6 +12,11 @@ try{
  const page=await browser.newPage(),errors=[],badRequests=[];page.on('pageerror',e=>errors.push(e.message));page.on('response',r=>{if(r.status()>=400)badRequests.push(r.url());});
  await page.goto(`http://127.0.0.1:${server.address().port}${prefix}`);await page.locator('h1').waitFor();
  assert.equal(await page.locator('#gpu-status').textContent()!=='Checking WebGPU…',true);
+ await page.locator('summary').filter({hasText:'Model preparation'}).click();
+ assert.equal(await page.locator('#gemm-backend').inputValue(),'half');
+ await page.locator('#gemm-backend').selectOption('prepared-integer');assert(await page.locator('#model-cache').isChecked());
+ await page.locator('#clear-model-cache').click();await page.waitForFunction(()=>document.querySelector('#status').textContent==='Local prepared-model cache cleared.');
+ await page.locator('#gemm-backend').selectOption('half');
  await page.locator('#dll').setInputFiles({name:'bad.dll',buffer:Buffer.alloc(64)});await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('not a Windows DLL'));
  const png=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=160;c.height=96;c.getContext('2d').fillRect(0,0,160,96);return c.toDataURL().split(',')[1];});
  await page.locator('#image').setInputFiles({name:'test.png',buffer:Buffer.from(png,'base64')});await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('160 × 96'));assert(await page.locator('#run').isDisabled());
@@ -21,5 +26,5 @@ try{
  await page.locator('#object').setInputFiles({name:'triangle.gltf',buffer:Buffer.from(JSON.stringify(gltf))});await page.waitForFunction(()=>document.querySelector('#status').textContent.includes('Input ready: 512 × 512'));
  assert(await page.locator('#resolution-error').isHidden());assert(await page.locator('#input-empty').isHidden());
  const assets=await page.evaluate(async()=>{const base=new URL('.',location.href);const manifest=await(await fetch(new URL('generated/manifest.json',base))).json();const paths=['node_modules/three/examples/jsm/libs/draco/gltf/draco_decoder.wasm','node_modules/three/examples/jsm/libs/basis/basis_transcoder.wasm',...Object.values(manifest).map(f=>'generated/'+f)];return Promise.all(paths.map(async p=>({p,ok:(await fetch(new URL(p,base))).ok})));});assert(assets.every(a=>a.ok),JSON.stringify(assets));
- assert.deepEqual(errors,[]);assert.deepEqual(badRequests,[]);console.log('Pages smoke test passed at repository subpath: module graph, CSS, DLL rejection, exact image dimensions, local glTF rendering, decoder assets, and all generated kernels. No proprietary test data used.');
+ assert.deepEqual(errors,[]);assert.deepEqual(badRequests,[]);console.log('Pages smoke test passed at repository subpath: module graph, CSS, preparation controls/cache clearing, DLL rejection, exact image dimensions, local glTF rendering, decoder assets, and all generated kernels. No proprietary test data used.');
 }finally{await browser?.close();await new Promise(r=>server.close(r));}

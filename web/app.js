@@ -3,8 +3,10 @@ import {NeuralRenderer} from '../src/engine.js';
 import {loadFixture,runParity} from '../src/parity.js';
 import {modelFromDll} from '../src/dll-model.js';
 import {assessResolution} from '../src/resolution.js';
+import {clearPreparedModelCache} from '../src/model-preparation.js';
 const $=id=>document.getElementById(id);
 let engine,bitmap,scene,objectInfo,mode='image',width=512,height=512,abort,fixture,downloadURL,busy=false,valid=false,inferenceError=null,resultReady=false,sourceName='',imageName='' ;
+let modelLabel='';
 const numeric=(id,min,max,integer=false)=>{const v=Number($(id).value);if(!$(id).value.trim()||!Number.isFinite(v)||v<min||v>max||(integer&&!Number.isInteger(v)))throw Error(`${$(id).closest('label')?.childNodes[0]?.textContent.trim()||id} must be ${integer?'an integer ':''}from ${min} to ${max}.`);return v;};
 function status(text,error=false){$('status').textContent=text;$('status').style.color=error?'#ffb3a9':'';}
 function hasSource(){return mode==='image'?!!bitmap:!!objectInfo;}
@@ -46,7 +48,19 @@ function updateSource(){
  finally{ready();}
 }
 async function operation(fn,{cancel=false}={}){busy=true;abort=cancel?new AbortController():null;ready();try{await fn();}catch(e){status(e.name==='AbortError'?'Render cancelled.':e.message,true);}finally{busy=false;abort=null;ready();}}
-async function loadModel(loader,label){await operation(async()=>{const model=await loader();status('Preparing WebGPU renderer…');const next=await NeuralRenderer.create(model);engine?.dispose();engine=next;$('model-status').textContent=`${label} · 71 blocks · ${model.tensors.size} tensors`;$('gpu-status').textContent='WebGPU ready';updateSource();if((valid&&!inferenceError)||!hasSource())status('NR support ready. Choose your input and render.');});}
+async function loadModel(loader,label){await operation(async()=>{
+ try{
+  const model=await loader();status('Preparing WebGPU renderer…');
+  const next=await NeuralRenderer.create(model,{gemmBackend:$('gemm-backend').value,modelCache:$('model-cache').checked,onPrepareProgress:p=>{status(`${p.phase==='hash'?'Identifying model':'Preparing model'} · ${p.completed} / ${p.total}`);$('progress').value=p.total?p.completed/p.total:0;}});
+  engine?.dispose();engine=next;modelLabel=label;
+  $('model-status').textContent=`${label} · 71 blocks · ${model.tensors.size} tensors`;
+  $('prepared-status').textContent=engine.preparedModel?`${engine.preparedModel.matrices.size} matrices prepared · format v${engine.preparedModel.formatVersion}`:engine.gemmBackend==='half'?'Standard renderer active.':'Prepared kernels unavailable on this device; using the standard renderer.';
+  $('gpu-status').textContent='WebGPU ready';updateSource();if((valid&&!inferenceError)||!hasSource())status('NR support ready. Choose your input and render.');
+ }catch(error){if(engine)$('gemm-backend').value=engine.gemmBackend??'half';throw error;}
+});}
+$('gemm-backend').onchange=()=>{if(engine)loadModel(()=>engine.model,modelLabel);};
+$('model-cache').onchange=()=>{if(engine&&engine.gemmBackend!=='half')loadModel(()=>engine.model,modelLabel);};
+$('clear-model-cache').onclick=()=>operation(async()=>{if(!await clearPreparedModelCache())throw Error('Browser storage is unavailable; saved preparation could not be cleared.');$('prepared-status').textContent='Saved model preparation cleared. The loaded model remains available.';status('Local prepared-model cache cleared.');});
 $('dll').onchange=()=>{const file=$('dll').files[0];if(file)loadModel(()=>modelFromDll(file,{onProgress:status}),file.name);};
 $('model').onchange=()=>{if($('model').files.length)loadModel(()=>Model.load(directoryReader($('model').files)),'Verified model folder');};
 async function loadImage(file){if(!file)return;await operation(async()=>{const next=await createImageBitmap(file);bitmap?.close();bitmap=next;sourceName=file.name;imageName=file.name;$('source-name').textContent=`${file.name} · ${bitmap.width} × ${bitmap.height}`;clearTemporal();updateSource();});}
@@ -77,7 +91,7 @@ $('run').onclick=()=>operation(async()=>{
  const frameStarted=performance.now();dimensions({inference:true});const seed=numeric('seed',0,4294967295,true),controls=conditioning(),extra=await extraInputs();if(mode==='object'){scene.configure(sceneSettings());scene.capture($('input'));}
  const proxy=Float32Array.from($('input').getContext('2d').getImageData(0,0,width,height).data,v=>v/255);invalidate();const started=performance.now();
  const result=await engine.run({width,height,proxy,...extra,seed,readHead:false,conditioning:controls,onProgress:progress,signal:abort.signal});const c=$('output');c.width=width;c.height=height;c.getContext('2d').putImageData(new ImageData(Uint8ClampedArray.from(result.output,v=>Math.round(Math.max(0,Math.min(1,v))*255)),width,height),0,0);
- const presented=performance.now();const blob=await new Promise(r=>c.toBlob(r));if(!blob)throw Error('PNG export failed.');if(downloadURL)URL.revokeObjectURL(downloadURL);downloadURL=URL.createObjectURL(blob);Object.assign($('download'),{href:downloadURL,download:`${sourceName.replace(/\.[^.]+$/,'')||'render'}-nr-${width}x${height}.png`,hidden:false});resultReady=true;$('output-empty').hidden=true;$('output-dims').textContent=`${width} × ${height}`;const completed=performance.now(),frameTimings={inputMs:started-frameStarted,engine:result.timings,presentationMs:presented-started-result.timings.totalMs,pngMs:completed-presented,totalMs:completed-frameStarted};c.dataset.timings=JSON.stringify(frameTimings);const seconds=(frameTimings.totalMs/1000).toFixed(1);status(`Completed in ${seconds} seconds.`);$('result-info').title=`Input ${frameTimings.inputMs.toFixed(1)} ms � NR ${result.timings.totalMs.toFixed(1)} ms � Display ${frameTimings.presentationMs.toFixed(1)} ms � PNG ${frameTimings.pngMs.toFixed(1)} ms`;$('result-info').textContent=`${width} × ${height} px · ${seconds} s · Seed ${seed}`;
+ const presented=performance.now();const blob=await new Promise(r=>c.toBlob(r));if(!blob)throw Error('PNG export failed.');if(downloadURL)URL.revokeObjectURL(downloadURL);downloadURL=URL.createObjectURL(blob);Object.assign($('download'),{href:downloadURL,download:`${sourceName.replace(/\.[^.]+$/,'')||'render'}-nr-${width}x${height}.png`,hidden:false});resultReady=true;$('output-empty').hidden=true;$('output-dims').textContent=`${width} × ${height}`;const completed=performance.now(),frameTimings={inputMs:started-frameStarted,engine:result.timings,presentationMs:presented-started-result.timings.totalMs,pngMs:completed-presented,totalMs:completed-frameStarted};c.dataset.timings=JSON.stringify(frameTimings);const seconds=(frameTimings.totalMs/1000).toFixed(1);status(`Completed in ${seconds} seconds.`);$('result-info').title=`Input ${frameTimings.inputMs.toFixed(1)} ms · NR ${result.timings.totalMs.toFixed(1)} ms · Display ${frameTimings.presentationMs.toFixed(1)} ms · PNG ${frameTimings.pngMs.toFixed(1)} ms`;$('result-info').textContent=`${width} × ${height} px · ${seconds} s · Seed ${seed}`;
 },{cancel:true});
 $('cancel').onclick=()=>abort?.abort();
 function setView(view){const wipe=view==='wipe'&&resultReady;$('comparison').classList.toggle('wipe',wipe);$('wipe-control').hidden=!wipe;$('view-pair').setAttribute('aria-pressed',String(!wipe));$('view-wipe').setAttribute('aria-pressed',String(wipe));$('after').style.clipPath=wipe?`inset(0 ${100-Number($('wipe').value)}% 0 0)`:'';}

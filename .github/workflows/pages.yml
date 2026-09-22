@@ -27,6 +27,7 @@ jobs:
       - run: npm test
       - run: npm run build:site
       - run: npx playwright install --with-deps chromium
+      - run: npm run test:model-cache
       - run: npm run test:site
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:

@@ -5,6 +5,7 @@ import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {half,e4,unpackActivations} from '../src/model.js';
 import {NeuralRenderer} from '../src/engine.js';
 import {dispatchGroups} from '../src/kernel-selection.js';
+import {prepareMatrix} from '../src/model-preparation.js';
 const report={passed:0,failed:0,checks:[]};let runtime;
 const check=(name,ok,detail='')=>{report[ok?'passed':'failed']++;report.checks.push({name,ok,detail});};
 try {
@@ -51,31 +52,69 @@ try {
   }
   {
     const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true}),tested=new Set();
+    let testedIntegerRange=false;
     const metadata=runtime.createBuffer(2048),siluTable=runtime.createBuffer(262144);
     runtime.batch().dispatch(kernels.nr_lookup_tables.bind({metadata,silu:siluTable}),[1024,1,1]).submit();
     const packed=(count,format)=>{const lanes=format===1?4:2,bits=format===1?8:16,a=new Uint32Array(Math.ceil(count/lanes));for(let i=0;i<count;i++)a[Math.floor(i/lanes)]|=(format===1?(24+(i*17)%48)|(i%3?0:128):0x3000+(i%31)|(i%3?0:32768))<<((i%lanes)*bits);return a;};
+    const weightFixture=s=>{
+      const codes=new Uint8Array(s.K*s.N*s.batches);
+      for(let i=0;i<codes.length;i++){
+        const k=Math.floor(i/s.N)%s.K,n=i%s.N;
+        // One tile includes empty columns, constant exponents, masked maxima,
+        // alternating signs, and the general exponent-scan fallback.
+        codes[i]=n%8===0?0:n%8===1?56+(k%8):n%8===2?(k%16?56:0):n%8===3?(k%16===1?80:8):n%8===4?128:n%8===5?(56+(k%8))|(k%2?128:0):n%8===6?(k%16?8:0):(24+(i*17)%48)|(i%3?0:128);
+      }
+      return new Uint32Array(codes.buffer);
+    };
     for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
       const s={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
       const base=gemmKernel(s),name=specializedGemm(base+'_compact',s);if(!name||tested.has(name))continue;tested.add(name);
       // Cross a 64-row boundary and leave a partial 64-column tile in the small QKV case.
       s.rows=s.K===32&&s.N===96?65:9;
-      const count=s.rows*s.N*s.batches,bindings={input:runtime.createBuffer(packed(s.rows*s.inputStride,s.inputFormat)),weights:runtime.createBuffer(packed(s.K*s.N*s.batches,1)),residual:runtime.createBuffer(s.hasResidual?packed(count,s.residualFormat):new Uint32Array(1)),scales:runtime.createBuffer(new Float32Array(s.N*s.batches).fill(.5)),raw:runtime.createBuffer(new Uint32Array((s.rawEnabled?count/2:1)+2).fill(0xdeadbeef)),output:runtime.createBuffer(new Uint32Array(count*(s.outputFormat===1?1:2)/4+2).fill(0xdeadbeef))};
+      const weightWords=weightFixture(s),preparedWeights=runtime.createBuffer(prepareMatrix(weightWords,s).words);
+      const inputWords=packed(s.rows*s.inputStride,s.inputFormat);
+      if(s.inputFormat===1)for(let i=0;i<s.rows*s.inputStride;i++){
+        const code=i%16===0?80:i%16===15?0:(8+i%7)|(i%3?0:128),shift=(i&3)*8;
+        inputWords[i>>>2]=(inputWords[i>>>2]&~(255<<shift))|(code<<shift);
+      }
+      const count=s.rows*s.N*s.batches,bindings={input:runtime.createBuffer(inputWords),weights:runtime.createBuffer(weightWords),residual:runtime.createBuffer(s.hasResidual?packed(count,s.residualFormat):new Uint32Array(1)),scales:runtime.createBuffer(new Float32Array(s.N*s.batches).fill(.5)),raw:runtime.createBuffer(new Uint32Array((s.rawEnabled?count/2:1)+2).fill(0xdeadbeef)),output:runtime.createBuffer(new Uint32Array(count*(s.outputFormat===1?1:2)/4+2).fill(0xdeadbeef))};
       try {
         runtime.batch().dispatch(kernels.nr_gemm_packed_compact.bind(bindings,s),[Math.ceil(count/64),1,1]).submit();
         const expected=await runtime.read(bindings.output,Uint32Array),raw=await runtime.read(bindings.raw,Uint32Array);
         const variants=[{name},{name:name+'_half'},
           {name:name+'_wide_half',rows:32,cols:32},
           {name:name+'_wide64x32_half',rows:64,cols:32},
-          {name:name+'_wide32x64_half',rows:32,cols:64}];
-        for(const {name:variant,rows:tileRows,cols:tileCols} of variants.filter(v=>kernels[v.name])){tested.add(variant);
+          {name:name+'_wide32x64_half',rows:32,cols:64},
+          {name:name+'_prepared_half',rows:32,cols:32,prepared:true},
+          {name:name+'_prepared_integer',rows:32,cols:32,prepared:true}];
+        for(const {name:variant,rows:tileRows,cols:tileCols,prepared} of variants.filter(v=>kernels[v.name])){tested.add(variant);
         runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
         // Deliberate surplus tile exercises row guards with all lanes reaching barriers.
         const groups=tileRows?Math.ceil(s.rows/tileRows)*s.batches*Math.ceil(s.N/tileCols):dispatchGroups(base,s,count);
-        runtime.batch().dispatch(kernels[variant].bind(tileRows?{...bindings,metadata,siluTable}:bindings,dynamicGemmScalars(s)),[groups+1,1,1]).submit();
+        const variantBindings=tileRows?{...bindings,metadata,siluTable,...(prepared?{weights:preparedWeights}:{})}:bindings;
+        runtime.batch().dispatch(kernels[variant].bind(variantBindings,dynamicGemmScalars(s)),[groups+1,1,1]).submit();
         const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
-        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]),`${s.rows} rows, ${s.N} columns, ${s.batches} batches; output and raw guards included`);
+        check('Specialized GEMM tail and publication: '+variant,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]),`${s.rows} rows, ${s.N} columns, ${s.batches} batches; exponent metadata cases, output and raw guards included`);
         }
-      }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
+        if(!testedIntegerRange&&s.K===32&&s.N===96&&kernels[name+'_prepared_integer']){
+          testedIntegerRange=true;
+          const fullRange=count=>{
+            const bytes=Uint8Array.from({length:count},(_,i)=>((i*29)%127)|(i%3?0:128));
+            return new Uint32Array(bytes.buffer);
+          };
+          const fullWeights=fullRange(s.K*s.N*s.batches),prepared=prepareMatrix(fullWeights,s);
+          check('Integer fixture exceeds native half weight bound',!prepared.boundedHalf);
+          runtime.write(bindings.input,fullRange(s.rows*s.inputStride));runtime.write(bindings.weights,fullWeights);runtime.write(preparedWeights,prepared.words);
+          runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
+          runtime.batch().dispatch(kernels.nr_gemm_packed_compact.bind(bindings,s),[Math.ceil(count/64),1,1]).submit();
+          const reference=await runtime.read(bindings.output,Uint32Array),referenceRaw=await runtime.read(bindings.raw,Uint32Array);
+          runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
+          const groups=Math.ceil(s.rows/32)*s.batches*Math.ceil(s.N/32);
+          runtime.batch().dispatch(kernels[name+'_prepared_integer'].bind({...bindings,weights:preparedWeights,metadata,siluTable},dynamicGemmScalars(s)),[2,Math.ceil((groups+1)/2),1]).submit();
+          const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
+          check('Prepared integer GEMM: full finite FP8 range, overflow publication, 2D surplus groups and guards',actual.every((v,i)=>v===reference[i])&&actualRaw.every((v,i)=>v===referenceRaw[i]));
+        }
+      }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);runtime.destroyBuffer(preparedWeights);}
     }
     check('Every built specialization is covered',Object.keys(kernels).filter(k=>/_compact_s[0-9]/.test(k)).every(k=>tested.has(k)));
     runtime.destroyBuffer(metadata);runtime.destroyBuffer(siluTable);

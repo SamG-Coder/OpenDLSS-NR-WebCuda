@@ -1,4 +1,6 @@
 import {wideTiles,wideTileForEntry,selectWideGemm,wideDispatchGroups} from './gemm-tiles.js';
+import {preparedBackendForEntry,supportsPreparedBackend,preparedGemmEntry} from './prepared-gemm.js';
+import {prepareModel,preparedMatrixKey,PREPARED_FORMAT_VERSION} from './model-preparation.js';
 import {specializedGemm,dynamicGemmScalars,boundedHalfWeights} from './gemm-specialization.js';
 import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {createGraph} from './graph.js';
@@ -9,7 +11,10 @@ import {GpuProfile} from './gpu-profile.js';
 import {gemmKernel,dispatchGroups,dispatchGrid} from './kernel-selection.js';
 export class NeuralRenderer {
   static async create(model,options={}) {
-    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,maxInFlightBatches=4,cacheNoise=true,specializeGemm=true,nativeHalf=true,wideGemm=true,gemmTile='auto',normalizeAttention=true,...runtimeOptions}=options;
+    const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,maxInFlightBatches=4,cacheNoise=true,specializeGemm=true,nativeHalf=true,wideGemm=true,gemmTile='auto',normalizeAttention=true,gemmBackend='half',modelCache=true,onPrepareProgress=()=>{},...runtimeOptions}=options;
+    if(!['half','prepared-half','prepared-integer'].includes(gemmBackend))throw Error('Invalid GEMM backend.');
+    if(typeof modelCache!=='boolean'||typeof onPrepareProgress!=='function')throw Error('Invalid model preparation options.');
+    if(gemmBackend!=='half'&&(!specializeGemm||activationStorage!=='packed'||!['auto','tile8x8','tile8x16'].includes(gemmMode)))throw Error('Prepared GEMM backends require packed activations and GEMM specialization in auto, tile8x8 or tile8x16 mode.');
     if(!Number.isInteger(maxInFlightBatches)||maxInFlightBatches<1||maxInFlightBatches>8)throw Error('In-flight batch limit must be 1 through 8.');
     if(typeof normalizeAttention!=='boolean')throw Error('normalizeAttention must be boolean.');
     if(gemmTile!=='auto'&&!Object.hasOwn(wideTiles,gemmTile))throw Error('Invalid GEMM tile.');
@@ -28,7 +33,9 @@ export class NeuralRenderer {
       const response=await fetch(new URL('../generated/manifest.json',import.meta.url));if(!response.ok)throw Error('Run npm run build before starting.');
       const manifest=await response.json();
       for(const [entry,file] of Object.entries(manifest)) {
-        if(entry==='nr_lookup_tables'&&!wideGemm)continue;
+        const preparedBackend=preparedBackendForEntry(entry);
+        if(preparedBackend&&(preparedBackend!==gemmBackend||!supportsPreparedBackend(preparedBackend,runtime.device)||(preparedBackend==='prepared-half'&&!nativeHalf)))continue;
+        if(entry==='nr_lookup_tables'&&!wideGemm&&gemmBackend==='half')continue;
         if(entry==='nr_local_attention_normalized'&&(!normalizeAttention||!runtime.device.features.has('shader-f16')||runtime.device.limits.maxComputeWorkgroupStorageSize<31680||runtime.device.limits.maxComputeInvocationsPerWorkgroup<512||runtime.device.limits.maxComputeWorkgroupSizeX<512||activationStorage!=='packed'||attentionMode!=='fused'))continue;
         const tile=wideTileForEntry(entry);
         if(tile&&(!wideGemm||selectWideGemm(entry.slice(0,-tile.suffix.length),manifest,runtime.device.limits,gemmTile)?.entry!==entry))continue;
@@ -36,7 +43,10 @@ export class NeuralRenderer {
         if(/_compact_s[0-9]/.test(entry)&&(!specializeGemm||activationStorage!=='packed'||!['auto','tile8x8','tile8x16'].includes(gemmMode)))continue;
         if(entry.startsWith('nr_gemm_multi')&&!entry.startsWith('nr_gemm_'+(gemmMode==='multi-auto'?'multi32x32':gemmMode)))continue;
         const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
-      return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize,maxInFlightBatches,cacheNoise,specializeGemm,nativeHalf,wideGemm,gemmTile,normalizeAttention});
+      const engine=new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize,maxInFlightBatches,cacheNoise,specializeGemm,nativeHalf,wideGemm,gemmTile,normalizeAttention});
+      engine.gemmBackend=gemmBackend;
+      if(Object.keys(kernels).some(entry=>preparedBackendForEntry(entry)))engine.preparedModel=await prepareModel(model,{cache:modelCache,onProgress:onPrepareProgress});
+      return engine;
     } catch(e) {runtime.dispose();throw e;}
   }
   constructor(runtime,kernels,model,{workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,maxInFlightBatches=4,cacheNoise=true,specializeGemm=true,nativeHalf=true,wideGemm=true,gemmTile='auto',normalizeAttention=true}={}) {this.runtime=runtime;this.kernels=kernels;this.model=model;this.busy=false;this.weightCache=new Map();this.weightCacheBytes=0;this.workspace=new Map();this.workspaceBytes=0;this.workspaceLimit=workspaceCacheBytes;this.gemmMode=gemmMode;this.attentionMode=attentionMode;this.activationStorage=activationStorage;this.executionMode=executionMode;this.planLimit=planCacheBytes;this.graphBatchSize=graphBatchSize;this.plan=null;this.graphCache=null;this.maxInFlightBatches=maxInFlightBatches;this.cacheNoise=cacheNoise;this.specializeGemm=specializeGemm;this.nativeHalf=nativeHalf;this.wideGemm=wideGemm;this.gemmTile=gemmTile;this.normalizeAttention=normalizeAttention;this.lookup=null;this.noise=null;}
@@ -69,8 +79,20 @@ export class NeuralRenderer {
     let groups=dispatchGroups(entry,scalars,count),limit=this.runtime.device.limits.maxComputeWorkgroupsPerDimension;
     if(formats&&activationBindings[entry]){scalars={...scalars,...Object.fromEntries(activationBindings[entry].map(b=>[b+'Format',formats[b]??0]))};entry+='_compact';}
     const profileScalars=scalars;
-    if(this.specializeGemm){const specialized=specializedGemm(entry,scalars);if(specialized&&this.kernels[specialized]){entry=this.nativeHalf&&bindings.weights?.boundedHalf&&this.kernels[specialized+'_half']?specialized+'_half':specialized;if(this.wideGemm&&entry.endsWith('_half')){const selected=selectWideGemm(specialized,this.kernels,this.runtime.device.limits,this.gemmTile);if(selected){entry=selected.entry;groups=wideDispatchGroups(selected.tile,scalars);}}scalars=dynamicGemmScalars(scalars);}}
-    if(wideTileForEntry(entry)){
+    if(bindings.weights?.preparedBackend&&!this.specializeGemm)throw Error('Prepared weights cannot use an unspecialized GEMM.');
+    if(this.specializeGemm){const specialized=specializedGemm(entry,scalars);if(specialized&&this.kernels[specialized]){
+      if(bindings.weights?.preparedBackend){
+        entry=preparedGemmEntry(specialized,bindings.weights.preparedBackend);
+        if(!this.kernels[entry])throw Error('Prepared weights require a matching GEMM pipeline.');
+        groups=wideDispatchGroups(wideTiles['32x32'],scalars);
+      }else{
+        entry=this.nativeHalf&&bindings.weights?.boundedHalf&&this.kernels[specialized+'_half']?specialized+'_half':specialized;
+        if(this.wideGemm&&entry.endsWith('_half')){const selected=selectWideGemm(specialized,this.kernels,this.runtime.device.limits,this.gemmTile);if(selected){entry=selected.entry;groups=wideDispatchGroups(selected.tile,scalars);}}
+      }
+      scalars=dynamicGemmScalars(scalars);
+    }else if(bindings.weights?.preparedBackend)throw Error('Prepared weights cannot use an unspecialized GEMM.');}
+    if(this.gemmDispatches&&entry.startsWith('nr_gemm'))this.gemmDispatches[preparedBackendForEntry(entry)?'prepared':'fallback']++;
+    if(wideTileForEntry(entry)||preparedBackendForEntry(entry)){
       if(!this.lookup){
         const metadata=this.runtime.createBuffer(256*8),siluTable=this.runtime.createBuffer(65536*4);
         this.runtime.batch().dispatch(this.kernels.nr_lookup_tables.bind({metadata,silu:siluTable}),[1024,1,1]).submit();
@@ -89,7 +111,7 @@ export class NeuralRenderer {
     if(typeof readHead!=='boolean')throw Error('readHead must be boolean.');
     const started=performance.now(),timings={setupMs:0,encodeMs:0,waitMs:0,completionMs:0,totalMs:0};
     if(this.busy)throw Error('An inference is already running.');this.busy=true;
-    this.profile=null;
+    this.profile=null;this.gemmDispatches={prepared:0,fallback:0};
     const runtime=this.runtime,model=this.model,live=new Map(),pool=this.workspace,owned=new Set();
     let poolBytes=this.workspaceBytes;const poolLimit=this.workspaceLimit;
     let inFlight=0,noiseReused=false;
@@ -125,7 +147,7 @@ export class NeuralRenderer {
     const take=alloc;
     try {
       this.profile=profile?new GpuProfile(this.runtime):null;
-      const graphKey=JSON.stringify([width,height,geometryOverride,this.activationStorage,this.gemmMode,this.attentionMode,this.specializeGemm,this.nativeHalf,this.wideGemm,this.gemmTile,this.normalizeAttention]);
+      const graphKey=JSON.stringify([width,height,geometryOverride,this.activationStorage,this.gemmMode,this.attentionMode,this.specializeGemm,this.nativeHalf,this.wideGemm,this.gemmTile,this.normalizeAttention,this.gemmBackend]);
       if(this.graphCache?.key!==graphKey)this.graphCache={key:graphKey,graph:createGraph(width,height,{geometryOverride,activationStorage:this.activationStorage,fuseLocalAttention:this.attentionMode==='fused',fuseNormalization:this.attentionMode==='fused'&&this.normalizeAttention&&Boolean(this.kernels.nr_local_attention_normalized)&&this.activationStorage==='packed'})};
       const graph=this.graphCache.graph,g=graph.geometry;
       const workspaceKey=graphKey;
@@ -175,23 +197,28 @@ export class NeuralRenderer {
       for(let index=0;index<graph.ops.length;index++) {
         if(signal?.aborted)throw new DOMException('Inference cancelled','AbortError');
         const op=graph.ops[index],bindings={},weights=[];
+        const formats=this.activationStorage==='packed'?Object.fromEntries(Object.entries(op.bindings).filter(([,id])=>typeof id==='string').map(([key,id])=>[key,graph.resources.get(id).format])):undefined;
+        const preparedEntry=this.preparedModel&&this.specializeGemm&&this.activationStorage==='packed'&&(this.gemmBackend!=='prepared-half'||this.nativeHalf)&&op.entry==='nr_gemm'?preparedGemmEntry(specializedGemm(gemmKernel(op.scalars,this.gemmMode)+'_compact',{...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',formats?.[key]??0]))}),this.gemmBackend):null;
         for(const [key,spec] of Object.entries(op.bindings)) {
           if(typeof spec==='string') {if(!live.has(spec))live.set(spec,plan?.resources.get(spec)??take(graph.resources.get(spec).bytes));bindings[key]=live.get(spec);}
           else if(spec.kind==='zero')bindings[key]=zero;
           else {
-            const persistent=typeof model.packedMatrix==='function',cacheKey=JSON.stringify(spec);
+            const persistent=typeof model.packedMatrix==='function';
+            const candidate=key==='weights'&&spec.kind==='matrix'&&preparedEntry&&this.kernels[preparedEntry]?this.preparedModel.matrices.get(preparedMatrixKey(spec)):null;
+            const prepared=candidate&&(this.gemmBackend!=='prepared-half'||candidate.boundedHalf)?candidate:null;
+            const cacheKey=(prepared?'prepared-v'+PREPARED_FORMAT_VERSION+':'+this.gemmBackend+':':'')+JSON.stringify(spec);
             const cached=persistent&&this.weightCache.get(cacheKey);
             if(cached){bindings[key]=cached;continue;}
             let data;
-            if(spec.kind==='matrix')data=persistent?model.packedMatrix(spec.name,spec.offset,spec.K,spec.N,spec):model.matrix(spec.name,spec.offset,spec.K,spec.N,spec);
+            if(spec.kind==='matrix')data=prepared?.words??(persistent?model.packedMatrix(spec.name,spec.offset,spec.K,spec.N,spec):model.matrix(spec.name,spec.offset,spec.K,spec.N,spec));
             if(spec.kind==='vector')data=model.vector(spec.name,spec.offset,spec.count,spec.type);
             if(spec.kind==='prior')data=model.prior(spec.name,spec.offset,spec.heads);
             const b=persistent?runtime.createBuffer(data):alloc(data);bindings[key]=b;
-            if(this.nativeHalf&&persistent&&spec.kind==='matrix'&&!spec.halfMode)b.boundedHalf=boundedHalfWeights(data);
+            if(prepared){b.preparedBackend=this.gemmBackend;b.boundedHalf=prepared.boundedHalf;}
+            else if(this.nativeHalf&&persistent&&spec.kind==='matrix'&&!spec.halfMode)b.boundedHalf=boundedHalfWeights(data);
             if(persistent){this.weightCache.set(cacheKey,b);this.weightCacheBytes+=b.size;}else weights.push(b);
           }
         }
-        const formats=this.activationStorage==='packed'?Object.fromEntries(Object.entries(op.bindings).filter(([,id])=>typeof id==='string').map(([key,id])=>[key,graph.resources.get(id).format])):undefined;
         batch??=runtime.batch();
         this.dispatch(op.entry==='nr_gemm'&&typeof model.packedMatrix==='function'?gemmKernel(op.scalars,this.gemmMode):op.entry,bindings,op.scalars,op.count,batch,formats,plan?index:undefined);queuedOps++;
         for(const b of weights)retire(b);model.cache.clear();
@@ -214,7 +241,7 @@ export class NeuralRenderer {
       }
       if(readHead)head=await this.readActivation(live.get(graph.head),graph.resources.get(graph.head));
       timings.completionMs=performance.now()-readbackStarted;timings.totalMs=performance.now()-started;
-      return {head,output,timings,noiseCache:{reused:noiseReused,bytes:this.noise?.buffer.size??0},geometry:g,dispatches:graph.ops.length,profile:await this.profile?.read(),workingBuffers:{created:createdBuffers,reused:reusedBuffers,prepared:!!plan,planBytes:plan?.bytes??0}};
+      return {head,output,timings,gemmBackend:{requested:this.gemmBackend??'half',...this.gemmDispatches},noiseCache:{reused:noiseReused,bytes:this.noise?.buffer.size??0},geometry:g,dispatches:graph.ops.length,profile:await this.profile?.read(),workingBuffers:{created:createdBuffers,reused:reusedBuffers,prepared:!!plan,planBytes:plan?.bytes??0}};
     } finally {batch?.discard();await runtime.idle().catch(()=>{});for(const b of [...owned]){
       if(!cacheBuffer(b,old=>runtime.destroyBuffer(old)))runtime.destroyBuffer(b);
     }
@@ -226,5 +253,5 @@ export class NeuralRenderer {
     const words=await this.runtime.read(buffer,Uint32Array,resource.bytes);
     return unpackActivations(words,resource.format,count);
   }
-  dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.weightCache.clear();this.weightCacheBytes=0;this.workspace.clear();this.workspaceBytes=0;this.plan=null;this.graphCache=null;this.noise=null;this.lookup=null;this.runtime.dispose();}
+  dispose(){if(this.busy)throw Error('Cancel and await inference before disposal.');this.weightCache.clear();this.weightCacheBytes=0;this.workspace.clear();this.workspaceBytes=0;this.plan=null;this.graphCache=null;this.noise=null;this.lookup=null;this.preparedModel=null;this.runtime.dispose();}
 }
