@@ -1,3 +1,7 @@
+import {createGraph} from '../src/graph.js';
+import {gemmKernel} from '../src/kernel-selection.js';
+import {specializedGemm} from '../src/gemm-specialization.js';
+import {specializeGemmSource} from './specialize-gemm.mjs';
 import {compactKernel} from './activation-variants.mjs';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
@@ -47,6 +51,17 @@ export async function build() {
     await writeFile('generated/'+entry+'.cu',source);
     await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));
     manifest[entry]=entry+'.json';await compact(source,entry,workgroupSize);
+  }
+  const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true});
+  for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
+    const scalars={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
+    const entry=gemmKernel(scalars)+'_compact',name=specializedGemm(entry,scalars);
+    if(!name||manifest[name])continue;
+    const base=JSON.parse(await readFile('generated/'+entry+'.json','utf8'));
+    const source=specializeGemmSource(await readFile('generated/'+entry+'.cu','utf8'),entry,name,scalars);
+    const artifact=compile(source,{entry:name,workgroupSize:base.metadata.workgroupSize});
+    await writeFile('generated/'+name+'.cu',source);
+    await writeFile('generated/'+name+'.json',JSON.stringify(serializableArtifact(artifact)));manifest[name]=name+'.json';
   }
   await writeFile('generated/manifest.json',JSON.stringify(manifest,null,2));
   return manifest;

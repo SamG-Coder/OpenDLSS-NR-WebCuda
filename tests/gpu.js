@@ -1,3 +1,6 @@
+import {createGraph} from '../src/graph.js';
+import {gemmKernel} from '../src/kernel-selection.js';
+import {specializedGemm,dynamicGemmScalars} from '../src/gemm-specialization.js';
 import {GpuRuntime} from '../vendor/webcuda/runtime/runtime.js';
 import {half,e4,unpackActivations} from '../src/model.js';
 import {NeuralRenderer} from '../src/engine.js';
@@ -35,6 +38,25 @@ try {
     const a=await runtime.read(reference,Uint32Array),b=await runtime.read(cached,Uint32Array);
     check(`Cached noise preserves all feature bits for seed ${seed}`,a.every((v,i)=>v===b[i]));
     for(const buffer of [proxy,history,noise,reference,cached])runtime.destroyBuffer(buffer);
+  }
+  {
+    const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true}),tested=new Set();
+    const packed=(count,format)=>{const lanes=format===1?4:2,bits=format===1?8:16,a=new Uint32Array(Math.ceil(count/lanes));for(let i=0;i<count;i++)a[Math.floor(i/lanes)]|=(format===1?(24+(i*17)%48)|(i%3?0:128):0x3000+(i%31)|(i%3?0:32768))<<((i%lanes)*bits);return a;};
+    for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
+      const s={...op.scalars,...Object.fromEntries(['input','residual','raw','output'].map(key=>[key+'Format',typeof op.bindings[key]==='string'?graph.resources.get(op.bindings[key]).format:0]))};
+      const base=gemmKernel(s),name=specializedGemm(base+'_compact',s);if(!name||tested.has(name))continue;tested.add(name);s.rows=9;
+      const count=s.rows*s.N*s.batches,bindings={input:runtime.createBuffer(packed(s.rows*s.inputStride,s.inputFormat)),weights:runtime.createBuffer(packed(s.K*s.N*s.batches,1)),residual:runtime.createBuffer(s.hasResidual?packed(count,s.residualFormat):new Uint32Array(1)),scales:runtime.createBuffer(new Float32Array(s.N*s.batches).fill(.5)),raw:runtime.createBuffer(new Uint32Array((s.rawEnabled?count/2:1)+2).fill(0xdeadbeef)),output:runtime.createBuffer(new Uint32Array(count*(s.outputFormat===1?1:2)/4+2).fill(0xdeadbeef))};
+      try {
+        runtime.batch().dispatch(kernels.nr_gemm_packed_compact.bind(bindings,s),[Math.ceil(count/64),1,1]).submit();
+        const expected=await runtime.read(bindings.output,Uint32Array),raw=await runtime.read(bindings.raw,Uint32Array);
+        runtime.write(bindings.output,new Uint32Array(expected.length).fill(0xdeadbeef));runtime.write(bindings.raw,new Uint32Array(raw.length).fill(0xdeadbeef));
+        // Deliberate surplus tile exercises row guards with all lanes reaching barriers.
+        runtime.batch().dispatch(kernels[name].bind(bindings,dynamicGemmScalars(s)),[dispatchGroups(base,s,count)+1,1,1]).submit();
+        const actual=await runtime.read(bindings.output,Uint32Array),actualRaw=await runtime.read(bindings.raw,Uint32Array);
+        check('Specialized GEMM tail and publication: '+name,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===raw[i]));
+      }finally{for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
+    }
+    check('Every built specialization is covered',Object.keys(kernels).filter(k=>/_compact_s[0-9]/.test(k)).every(k=>tested.has(k)));
   }
   // Exhaust every finite half bit pattern, plus NaNs/infinities, without assuming float32 NaN payloads survive.
   const values=Float32Array.from({length:65536},(_,i)=>half(i));

@@ -11,6 +11,7 @@ test('Renderer rejects invalid cache budgets and GEMM modes before requesting a 
   await assert.rejects(NeuralRenderer.create({}, {attentionMode:'unknown'}),/attention mode/);
   for(const maxInFlightBatches of [0,9,NaN,1.5])await assert.rejects(NeuralRenderer.create({}, {maxInFlightBatches}),/In-flight/);
   await assert.rejects(NeuralRenderer.create({}, {cacheNoise:1}),/cacheNoise/);
+  await assert.rejects(NeuralRenderer.create({}, {specializeGemm:1}),/specializeGemm/);
   for(const graphBatchSize of [0,65,NaN,1.5])await assert.rejects(NeuralRenderer.create({}, {graphBatchSize}),/batch size/);
   await assert.rejects(NeuralRenderer.create({}, {activationStorage:'unknown'}),/activation storage/);
   await assert.rejects(NeuralRenderer.create({}, {executionMode:'unknown'}),/execution plan/);
@@ -36,11 +37,13 @@ test('Automatic selection keeps the proven kernels; multi-output modes are expli
 
 test('Default setup skips experimental pipelines and opt-in loads only the selected family',async()=>{
   const originalCreate=GpuRuntime.create,originalFetch=globalThis.fetch,loaded=[];
-  const manifest={nr_numeric:'nr_numeric.json',nr_gemm_multi8x32:'nr_gemm_multi8x32.json',nr_gemm_multi8x32_compact:'nr_gemm_multi8x32_compact.json',nr_gemm_multi32x32:'nr_gemm_multi32x32.json',nr_gemm_multi32x32_compact:'nr_gemm_multi32x32_compact.json'};
+  const manifest={nr_gemm_tile8x8_compact_s0:'nr_gemm_tile8x8_compact_s0.json',nr_numeric:'nr_numeric.json',nr_gemm_multi8x32:'nr_gemm_multi8x32.json',nr_gemm_multi8x32_compact:'nr_gemm_multi8x32_compact.json',nr_gemm_multi32x32:'nr_gemm_multi32x32.json',nr_gemm_multi32x32_compact:'nr_gemm_multi32x32_compact.json'};
   GpuRuntime.create=async()=>({kernel:async artifact=>{loaded.push(artifact.entry);return {};},dispose:()=>{}});
   globalThis.fetch=async url=>({ok:true,json:async()=>String(url).endsWith('/manifest.json')?manifest:{entry:String(url).split('/').pop().replace('.json','')}});
   try {
-    await NeuralRenderer.create({});assert.deepEqual(loaded,['nr_numeric']);loaded.length=0;
+    await NeuralRenderer.create({});assert.deepEqual(loaded,['nr_gemm_tile8x8_compact_s0','nr_numeric']);loaded.length=0;
+    await NeuralRenderer.create({},{specializeGemm:false});assert.deepEqual(loaded,['nr_numeric']);loaded.length=0;
+    await NeuralRenderer.create({},{activationStorage:'float'});assert.deepEqual(loaded,['nr_numeric']);loaded.length=0;
     await NeuralRenderer.create({},{gemmMode:'multi32x32'});assert.deepEqual(loaded,['nr_numeric','nr_gemm_multi32x32','nr_gemm_multi32x32_compact']);
   }finally{GpuRuntime.create=originalCreate;globalThis.fetch=originalFetch;}
 });
