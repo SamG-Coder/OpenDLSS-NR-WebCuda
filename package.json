@@ -10,7 +10,6 @@
     "test:gpu": "node scripts/test-gpu.mjs",
     "test:ui": "node scripts/test-ui.mjs",
     "test:prepared": "node scripts/test-prepared.mjs",
-    "test:model-cache": "node scripts/test-model-cache.mjs",
     "test:real": "node scripts/test-real-model.mjs",
     "benchmark:upstream": "node scripts/benchmark-upstream.mjs",
     "benchmark:execution": "node scripts/benchmark-execution.mjs",

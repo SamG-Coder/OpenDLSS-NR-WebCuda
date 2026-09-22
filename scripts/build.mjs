@@ -65,8 +65,6 @@ export async function build() {
     manifest[entry]=entry+'.json';await compact(source,entry,workgroupSize);
   }
   const wideTemplate=await readFile('kernels/gemm-wide.cu','utf8');
-  const precomputedTemplate=await readFile('kernels/gemm-precomputed.cu','utf8');
-  const preparedTemplate=await readFile('kernels/gemm-prepared.cu','utf8');
   const halfTemplate=await readFile('kernels/gemm-half.cu','utf8');
   const graph=createGraph(1280,720,{activationStorage:'packed',fuseLocalAttention:true});
   for(const op of graph.ops)if(op.entry==='nr_gemm'&&!op.scalars.halfMode){
@@ -93,28 +91,6 @@ export async function build() {
           const wideName=name+suffix,wideSource=specializeGemmSource(tileCuda,'nr_gemm_wide',wideName,scalars);
           const wideArtifact=compile(wideSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:wideName,workgroupSize:[defines.THREADS,1,1]});
           await writeFile('generated/'+wideName+'.cu',wideSource);await writeFile('generated/'+wideName+'.json',JSON.stringify(serializableArtifact(wideArtifact)));manifest[wideName]=wideName+'.json';
-        }
-        if(scalars.K%32===0&&scalars.N%32===0){
-          // Precompute both weight operands and exponents once per model. Keep
-          // the established wide-kernel arithmetic and the same tile choices.
-          const precomputedCuda=header+'\n'+precomputedTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "vector-f13.cuh"\s*/m,vectorF13+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
-          for(const [tileRows,tileCols] of [[32,32],[64,32],[32,64]]){
-            const suffix=tileRows===32&&tileCols===32?'_precomputed_half':`_precomputed${tileRows}x${tileCols}_half`;
-            const defines={ROWS:tileRows,COLS:tileCols,THREADS:tileRows*tileCols/8,COLUMN_GROUPS:tileCols/4,A_PAIRS:tileRows*16,B_PAIRS:tileCols*17,INPUT_WORDS:tileRows*8,WEIGHT_PAIRS:tileCols*16};
-            let tileCuda=precomputedCuda;for(const [key,value] of Object.entries(defines))tileCuda=tileCuda.replace(new RegExp('#define NR_WIDE_'+key+' \\d+'),'#define NR_WIDE_'+key+' '+value);
-            const precomputedName=name+suffix,precomputedSource=specializeGemmSource(tileCuda,'nr_gemm_precomputed',precomputedName,scalars);
-            const precomputedArtifact=compile(precomputedSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:precomputedName,workgroupSize:[defines.THREADS,1,1]});
-            await writeFile('generated/'+precomputedName+'.cu',precomputedSource);await writeFile('generated/'+precomputedName+'.json',JSON.stringify(serializableArtifact(precomputedArtifact)));manifest[precomputedName]=precomputedName+'.json';
-          }
-          // Older compact experiments retain original FP8 codes and append
-          // group exponent metadata. Their tile remains fixed at 32x32.
-          const preparedCuda=header+'\n'+preparedTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "vector-f13.cuh"\s*/m,vectorF13+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
-          for(const integer of [0,1]){
-            const preparedName=name+(integer?'_prepared_integer':'_prepared_half');
-            const preparedSource=specializeGemmSource(preparedCuda.replace('#define NR_PREPARED_INTEGER 0','#define NR_PREPARED_INTEGER '+integer),'nr_gemm_prepared',preparedName,scalars);
-            const preparedArtifact=compile(preparedSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:preparedName,workgroupSize:[128,1,1]});
-            await writeFile('generated/'+preparedName+'.cu',preparedSource);await writeFile('generated/'+preparedName+'.json',JSON.stringify(serializableArtifact(preparedArtifact)));manifest[preparedName]=preparedName+'.json';
-          }
         }
       }
     }
