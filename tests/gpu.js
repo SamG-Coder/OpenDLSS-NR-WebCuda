@@ -95,6 +95,20 @@ try {
       }
     }finally{for(const b of [qkv,prior,weights,inverse])runtime.destroyBuffer(b);}
   }
+  for(const format of [1,2]) {
+    const count=65535,values=Float32Array.from({length:count},(_,i)=>half(i)),input=runtime.createBuffer(values);
+    const packed=runtime.createBuffer(new Uint32Array(Math.ceil(count/(format===1?4:2))).fill(0xffffffff)),reference=runtime.createBuffer(count*4);
+    try {
+      for(let pass=0;pass<2;pass++){
+        if(pass){values.reverse();runtime.write(input,values);}
+        dispatch('nr_publish',{input,output:reference},{count,quantize:format===1?1:0},count);
+        dispatch('nr_publish_compact',{input,output:packed},{count,quantize:format===1?1:0,inputFormat:0,outputFormat:format},count);
+        const expected=await runtime.read(reference),words=await runtime.read(packed,Uint32Array),codes=format===1?new Uint8Array(words.buffer):new Uint16Array(words.buffer);
+        let errors=0;for(let i=0;i<count;i++)if(!Object.is(expected[i],format===1?e4(codes[i]):half(codes[i])))errors++;
+        check(`Compact activation stores ${format===1?'FP8':'FP16'} pass ${pass+1}: signs, NaNs, dirty words, odd tail`,errors===0,`${errors} mismatches`);
+      }
+    }finally{for(const b of [input,packed,reference])runtime.destroyBuffer(b);}
+  }
   const nativeResponse=await fetch('../build/native/cases.json');
   if(nativeResponse.ok) {
     for(const c of await nativeResponse.json()) {
@@ -126,7 +140,7 @@ try {
     }
   } else report.nativeFixtures='Not supplied; run scripts/test-native.ps1';
   const synthetic={cache:new Map(),matrix:(name,offset,K,N,{batches=1})=>new Float32Array(K*N*batches),vector:(name,offset,n)=>new Float32Array(n).fill(1),prior:(name,offset,heads)=>new Float32Array(heads*4096)};
-  const engine=new NeuralRenderer(runtime,kernels,synthetic,{workspaceCacheBytes:0}),boundaries=[];
+  const engine=new NeuralRenderer(runtime,kernels,synthetic,{workspaceCacheBytes:0,activationStorage:'float',executionMode:'streamed'}),boundaries=[];
   const run=await engine.run({width:2,height:2,inputFeatures:new Float32Array(64),geometryOverride:{width:2,height:2,fullWidth:2,fullHeight:2,levels:Array.from({length:6},()=>({width:1,height:1}))},capture:(name,data)=>{if(!data.every(x=>x===0))throw Error('Nonzero synthetic boundary '+name);boundaries.push(name);}});
   check('Complete graph executes all 75 comparable boundaries (synthetic weights, tiny test geometry)',boundaries.length===75&&new Set(boundaries).size===75&&run.head.every(x=>x===0),`${run.dispatches} dispatches, ${boundaries.length} boundaries`);
   const args={width:2,height:2,inputFeatures:new Float32Array(64),geometryOverride:{width:2,height:2,fullWidth:2,fullHeight:2,levels:Array.from({length:6},()=>({width:1,height:1}))}};
@@ -139,13 +153,13 @@ try {
   const restarted=await engine.run(args);
   check('Renderer can restart after cancellation with identical output',restarted.head.every((x,i)=>Object.is(x,run.head[i]))&&runtime.buffers.size===resourcesBefore);
   const persistentModel={...synthetic,packedMatrix:(name,offset,K,N,{batches=1,halfMode})=>new Uint32Array(Math.ceil(K*N*batches/(halfMode?2:4)))};
-  const persistent=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:0});
+  const persistent=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:0,executionMode:'streamed'});
   await persistent.run(args);
   const cacheBytes=persistent.weightCacheBytes,cacheSize=persistent.weightCache.size,uploaded=runtime.stats.dataBytesUploaded;
   const warm=await persistent.run(args);
   check('Packed model persists without weight uploads on repeated renders',cacheBytes>0&&persistent.weightCacheBytes===cacheBytes&&persistent.weightCache.size===cacheSize&&runtime.stats.dataBytesUploaded-uploaded===args.inputFeatures.byteLength+4&&warm.head.every((x,i)=>Object.is(x,run.head[i])));
   persistent.clearWeightCache();
-  const workspaceEngine=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:1024*1024});
+  const workspaceEngine=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:1024*1024,executionMode:'streamed'});
   const firstWorkspace=await workspaceEngine.run(args),secondWorkspace=await workspaceEngine.run({...args,profile:true});
   check('Persistent workspace reuses allocations within its budget',workspaceEngine.workspaceBytes>0&&workspaceEngine.workspaceBytes<=1024*1024&&secondWorkspace.workingBuffers.created<firstWorkspace.workingBuffers.created&&secondWorkspace.head.every((v,i)=>Object.is(v,firstWorkspace.head[i])));
   check('GPU profiling reports actual per-dispatch timestamps or explicit unsupported status',secondWorkspace.profile.supported?secondWorkspace.profile.dispatches.length===653&&secondWorkspace.profile.dispatches.every(r=>Number.isFinite(r.gpuMs)&&r.gpuMs>=0):!!secondWorkspace.profile.reason);
@@ -165,5 +179,20 @@ try {
   const recovered=await persistent.run(args);
   check('Cancelled packed cache can resume without stale resources',packedCancelled&&partialSize>0&&persistent.weightCache.size===cacheSize&&recovered.head.every((x,i)=>Object.is(x,run.head[i])));
   persistent.clearWeightCache();
+  const prepared=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:1024*1024});
+  const preparedFirst=await prepared.run(args),beforeWarmBinds=runtime.stats.bindGroupsCreated;
+  const preparedWarm=await prepared.run(args);
+  check('Prepared packed graph reuses every graph allocation and binding',preparedWarm.workingBuffers.prepared&&preparedWarm.workingBuffers.created===0&&runtime.stats.bindGroupsCreated===beforeWarmBinds&&preparedWarm.head.every((v,i)=>Object.is(v,run.head[i])));
+  const changed=await prepared.run({...resizeArgs,profile:true});
+  check('Prepared graph resizes safely and supports timestamp profiling',changed.head.length===36&&changed.head.every(v=>v===0)&&(!changed.profile.supported||changed.profile.dispatches.length===653));
+  const cancelPlan=new AbortController();let planCancelled=false;
+  try{await prepared.run({...resizeArgs,signal:cancelPlan.signal,onProgress:({index})=>{if(index===3)cancelPlan.abort();}});}catch(e){planCancelled=e.name==='AbortError';}
+  const resumedPlan=await prepared.run(resizeArgs);
+  check('Prepared graph resumes after a partial batch is cancelled',planCancelled&&resumedPlan.head.every(v=>v===0));
+  prepared.clearWorkspace();prepared.clearWeightCache();
+  check('Clearing the prepared graph releases buffers and cached bindings',prepared.plan===null&&runtime.buffers.size===resourcesBefore);
+  const fallback=new NeuralRenderer(runtime,kernels,persistentModel,{workspaceCacheBytes:0,planCacheBytes:0});
+  const fallbackRun=await fallback.run(args);fallback.clearWeightCache();
+  check('Plan budget falls back to streamed execution without changing output',!fallbackRun.workingBuffers.prepared&&fallbackRun.head.every((v,i)=>Object.is(v,run.head[i]))&&runtime.buffers.size===resourcesBefore);
 } catch(error) {check('GPU execution',false,String(error.stack||error));}
 finally {runtime?.dispose();window.report=report;document.querySelector('#result').textContent=JSON.stringify(report,null,2);}

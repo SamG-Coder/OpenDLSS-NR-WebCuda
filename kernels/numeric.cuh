@@ -1,6 +1,6 @@
 #pragma once
 // Reconstructed from OpenDLSS-NR src/numeric.h and src/reference.cpp (MIT).
-// Float storage is used deliberately; every half publication is explicit.
+// Arithmetic uses float values; every half publication is explicit.
 __device__ unsigned nr_rshift(unsigned v, unsigned s) {
   if (s == 0u) return v;
   if (s > 31u) return 0u;

@@ -7,6 +7,13 @@ export function e4(b) { const s=b&128?-1:1,e=(b>>>3)&15,m=b&7;return (b&127)===1
 // Decode each representable value once; large tensors otherwise repeat exponentiation.
 const e4Values=Float32Array.from({length:256},(_,i)=>e4(i));
 const halfValues=Float32Array.from({length:65536},(_,i)=>half(i));
+// Readback only: reconstruct published activation values using the same code tables.
+export function unpackActivations(words,format,count) {
+  const codes=format===1?new Uint8Array(words.buffer,words.byteOffset,words.byteLength):new Uint16Array(words.buffer,words.byteOffset,words.byteLength/2);
+  const table=format===1?e4Values:halfValues,result=new Float32Array(count);
+  for(let i=0;i<count;i++)result[i]=table[codes[i]];
+  return result;
+}
 export function packedIndex(k,n,N) {return (k>>>5)*N*32+(n>>>7)*4096+((n&127)>>>6)*2048+((n&63)>>>4)*512+(((n&7)*4+((k&15)>>>2))*16)+((n&15)>>>3)*8+((k&31)>>>4)*4+(k&3);}
 export function inverseInput(k) {return (k&~31)+(k&17)+((k&2)<<1)+((k&4)<<1)+((k&8)>>>2);}
 export function halfIndex(k,n,N) {return ((k>>>4)*Math.ceil(N/16)+(n>>>4))*256+((n&7)*4+((k&7)>>>1))*8+((n>>>3)&1)*4+((k&15)>=8?2:0)+(k&1);}

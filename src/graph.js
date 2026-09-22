@@ -1,6 +1,6 @@
 import {geometry,layout,phases,align} from './geometry.js';
 // Host scheduling only. Every numerical operation is compiled from kernels/*.cu.
-export function createGraph(width,height,{geometryOverride}={}) {
+export function createGraph(width,height,{geometryOverride,activationStorage='float'}={}) {
   const g=geometryOverride||geometry(width,height),ops=[],resources=new Map();let serial=0;
   const phasesUsed=Array(7).fill(0),boundaries={};
   function resource(rows,channels,label) {const id=`${label}:${serial++}`;resources.set(id,{rows,channels,bytes:rows*channels*4});return id;}
@@ -91,5 +91,21 @@ export function createGraph(width,height,{geometryOverride}={}) {
   const last=block(merged.out,70,32,g.fullWidth,g.fullHeight,6,post,merged.raw);
   const head=gemm(last.raw,tensor(70),post.head,32,4,{halfMode:1,quantize:0,label:'head'}).out;
   delete boundaries['block-70'];
+  if(!['float','packed'].includes(activationStorage))throw Error('Invalid activation storage mode.');
+  for(const r of resources.values())r.format=0;
+  if(activationStorage==='packed') {
+    const mark=(id,format)=>{const r=resources.get(id);r.format=format;r.bytes=Math.ceil(r.rows*r.channels*(format===1?1:2)/4)*4;};
+    const readers=new Set([head]);
+    for(const op of ops)for(const [key,id] of Object.entries(op.bindings))if(typeof id==='string'&&!['output','raw','scores','weights','inverse'].includes(key))readers.add(id);
+    // Softmax and attention read scores/weights/inverse under those same names.
+    for(const op of ops)if(op.entry==='nr_softmax')readers.add(op.bindings.scores);else if(op.entry==='nr_attend'){readers.add(op.bindings.weights);readers.add(op.bindings.inverse);}
+    for(const op of ops) {
+      const b=op.bindings;
+      if(b.raw){mark(b.raw,2);op.scalars.rawEnabled=readers.has(b.raw)?1:0;if(!op.scalars.rawEnabled)resources.get(b.raw).bytes=4;}
+      if(op.entry==='nr_scores')mark(b.scores,2);
+      else if(op.entry==='nr_softmax'){mark(b.weights,1);mark(b.inverse,2);}
+      else if(b.output)mark(b.output,op.entry==='nr_publish'||op.entry==='nr_gemm'&&!op.scalars.quantize?2:1);
+    }
+  }
   return {geometry:g,ops,resources,features,head,boundaries};
 }

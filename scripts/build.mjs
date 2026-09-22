@@ -1,3 +1,4 @@
+import {compactKernel} from './activation-variants.mjs';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {compile,serializableArtifact} from '../vendor/webcuda/compiler/compiler.js';
 export const families = ['ops','gemm','attention','frame'];
@@ -5,7 +6,15 @@ export async function build() {
   await mkdir('generated',{recursive:true});
   const header = (await readFile('kernels/numeric.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const packed = (await readFile('kernels/packed.cuh','utf8')).replace(/^#pragma once\s*/m,'');
+  const activationHeader=(await readFile('kernels/activations.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const manifest = {};
+  async function compact(source,entry,workgroupSize){
+    const cuda=compactKernel(source,entry,activationHeader);if(!cuda)return;
+    const name=entry+'_compact',artifact=compile(cuda,{entry:name,workgroupSize});
+    await writeFile('generated/'+name+'.cu',cuda);
+    await writeFile('generated/'+name+'.json',JSON.stringify(serializableArtifact(artifact)));
+    manifest[name]=name+'.json';
+  }
   for (const family of families) {
     const source = header + '\n' + (await readFile(`kernels/${family}.cu`,'utf8')).replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n');
     await writeFile(`generated/${family}.cu`,source);
@@ -15,6 +24,7 @@ export async function build() {
       await writeFile(`generated/${entry}.json`,JSON.stringify(serializableArtifact(artifact)));
       await writeFile(`generated/${entry}.wgsl`,artifact.wgsl);
       manifest[entry] = `${entry}.json`;
+      await compact(source,entry,[64,1,1]);
       console.log(`${entry}: ${artifact.wgsl.length} bytes WGSL`);
     }
   }
@@ -25,6 +35,7 @@ export async function build() {
     await writeFile('generated/'+entry+'.cu',source);
     await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));
     await writeFile('generated/'+entry+'.wgsl',artifact.wgsl);
+    await compact(source,entry,[rows*cols,1,1]);
     manifest[entry]=entry+'.json';console.log(entry+': '+artifact.wgsl.length+' bytes WGSL');
   }
   await writeFile('generated/manifest.json',JSON.stringify(manifest,null,2));
