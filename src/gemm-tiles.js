@@ -10,7 +10,8 @@ export function supportsWideTile(tile,limits){
   return tile.sharedBytes<=limits?.maxComputeWorkgroupStorageSize&&tile.threads<=limits?.maxComputeInvocationsPerWorkgroup&&tile.threads<=limits?.maxComputeWorkgroupSizeX;
 }
 export function preferredWideTile(base){
-  // Conservative policy from paired 720p/1080p RTX 5080 shape measurements.
+  // Provisional policy from contended 720p/1080p RTX 5080 measurements.
+  // See reports/performance-tiles.md; confirm performance in a quiet GPU run.
   // Rows remain dynamic; this chooses one pipeline per fixed matrix signature.
   const match=/_compact_s(\d+)_(\d+)_/.exec(base);
   if(!match)return '32x32';

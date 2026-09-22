@@ -125,7 +125,7 @@ The deterministic Box–Muller path uses software binary64 for trigonometry and 
 
 ## Performance
 
-The current renderer packs large dispatches into a compact 2D grid and selects 32 x 32, 64 x 32 or 32 x 64 GEMM tiles by matrix shape. See the [tile and dispatch-grid measurements](reports/performance-tiles.md) for the latest paired comparison. The same CUDA template generates all three tiles; only one wide variant per specialization is loaded.
+The current renderer packs large dispatches into a compact 2D grid and selects 32 x 32, 64 x 32 or 32 x 64 GEMM tiles by matrix shape. See the [tile and dispatch-grid measurements](reports/performance-tiles.md) for the latest paired comparison. The same CUDA template generates all three tiles; only one wide variant per specialization is loaded. The tile policy and timing differences are provisional because a separate GPU benchmark campaign was running concurrently.
 
 The earlier specialization pass measured **436.80 ms at 720p** and **1014.85 ms at 1080p** (medians of six alternating warm samples per configuration). Exact GEMM specialization reduced engine time by **21.7% / 23.3%** against identical settings with specialization disabled (557.70 / 1323.20 ms). Final float32 output hashes match at both resolutions. These timings exclude source capture, display conversion, and PNG export; the UI measures those separately. See [specialization measurements](reports/performance-specialization.md) and the preceding [execution and noise-cache measurements](reports/performance-execution.md).
 

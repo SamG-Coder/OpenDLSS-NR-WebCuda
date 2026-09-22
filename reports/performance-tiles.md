@@ -2,16 +2,18 @@
 
 This pass follows `6aacccb`. The paired baseline uses that revision's renderer and saved generated shaders, preserving its old dispatch grid as well as its kernels. Measurements use RTX 5080 / Edge 153.0.4234.48 on 2026-09-22.
 
+**Timing status: provisional under concurrent GPU load.** After these runs, the user confirmed that a separate GEMM/subgroup benchmark campaign was running at the same time. Both the image-render and isolated-tile measurements below shared the GPU with that workload. Their numerical results are retained for transparency, but the differences do not establish an isolated speedup caused by this change. The tile-selection policy needs confirmation in a quiet run. Exact-output checks remain valid.
+
 ## Real-model image renders
 
 Twenty alternating warm samples per engine and resolution, including preprocessing, network, composition and final float32 output readback. Setup, source creation, hashing and UI conversion are excluded. Both sides skip the optional head readback. Every cold and timed output hash matched exactly.
 
-| Resolution | Previous renderer median | New renderer median | Less render time |
+| Resolution | Previous renderer median | New renderer median | Observed lower median, contended |
 | --- | ---: | ---: | ---: |
 | 1280 x 720 | 236.70 ms | 226.80 ms | 4.2% |
 | 1920 x 1080 | 479.05 ms | 452.50 ms | 5.5% |
 
-There was background GPU activity and substantial timing variation during this session. At 720p the previous/new sample ranges were 193.70–297.00 / 193.70–285.50 ms; at 1080p they were 417.70–580.10 / 388.10–539.60 ms. The candidate was faster in 11 of 20 corresponding 720p rounds and 15 of 20 1080p rounds. These are modest observed gains, with weaker evidence at 720p; absolute times should not be compared with the quieter session in the preceding report.
+There was substantial timing variation during this session. At 720p the previous/new sample ranges were 193.70–297.00 / 193.70–285.50 ms; at 1080p they were 417.70–580.10 / 388.10–539.60 ms. The candidate was faster in 11 of 20 corresponding 720p rounds and 15 of 20 1080p rounds. These are descriptive results under contention, not confirmed performance gains. Absolute times should not be compared with the quieter session in the preceding report.
 
 The initial six-sample run was noisy enough to show a 1080p median regression (431.50 to 461.20 ms), despite exact outputs. The larger run above retained all twenty samples rather than filtering slow results. No additional timing runs were used to select a favorable result. Shader setup remained approximately 28–29 seconds for both engines. The upstream renderer was not rebenchmarked in this pass.
 
@@ -27,7 +29,7 @@ The same CUDA GEMM template now generates three tile shapes. Each thread still o
 | 64 x 32 | 256 | 12,544 |
 | 32 x 64 | 256 | 12,800 |
 
-The default selection uses 64 x 32 for K32/N32 and K64/N128; 32 x 64 for K32/N64, K32/N128, K64/N64, K64/N192, K64/N256, K128/N384 and K256/N768; and the established 32 x 32 tile elsewhere. This changes 98 of the graph's 358 FP8 GEMM dispatches. Deep matrices keep the smaller workgroup because the larger tiles measured slower there.
+The provisional default selection uses 64 x 32 for K32/N32 and K64/N128; 32 x 64 for K32/N64, K32/N128, K64/N64, K64/N192, K64/N256, K128/N384 and K256/N768; and the established 32 x 32 tile elsewhere. This changes 98 of the graph's 358 FP8 GEMM dispatches. Deep matrices keep the smaller workgroup because the larger tiles measured slower there. The measurements supporting these choices were also affected by the concurrent campaign.
 
 Only one wide variant per specialization is loaded. Device checks cover shared storage, invocation count and X dimension. Missing or unsupported variants fall back to 32 x 32, then the existing smaller half/scalar paths. Native-half support and the bounded-weight check remain required. Weight and activation caches do not grow, and no WebCuda compiler change is required for this pass.
 
@@ -35,9 +37,9 @@ Only one wide variant per specialization is loaded. Device checks cover shared s
 
 The DLL-free shape benchmark covers 45 specialization/row combinations per resolution, accounting for all 358 FP8 GEMM calls. It uses deterministic synthetic values, exact packed-output and raw-output comparisons, two warmup passes, and seven rotating samples of three dispatches. GPU timestamps exclude compilation, upload and comparison readbacks.
 
-The following weighted sums use the **corrected dispatch grid on both sides**. They isolate tile selection and exclude the separate benefit of the grid fix. They are estimates from isolated kernels, not whole-network or frame timings.
+The following weighted sums use the **corrected dispatch grid on both sides** and exclude the separate benefit of the grid fix. They compare individual kernels under concurrent GPU load, not whole-network or frame timings; they do not establish uncontended tile performance.
 
-| Resolution | All 32 x 32 | Selected tiles | Less estimated FP8 time |
+| Resolution | All 32 x 32 | Selected tiles | Observed estimate difference, contended |
 | --- | ---: | ---: | ---: |
 | 1280 x 720 | 108.42 ms | 106.87 ms | 1.4% |
 | 1920 x 1080 | 231.24 ms | 225.71 ms | 2.4% |
