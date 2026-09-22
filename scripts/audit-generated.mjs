@@ -11,21 +11,44 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.evaluate(()=>{const input=document.createElement('input');input.type='file';input.id='local-model';document.body.append(input);});
   await page.locator('#local-model').setInputFiles(process.env.NR_DLL);
-  const experiment=process.env.NR_AUDIT||'bitscan';if(!['bitscan','barriers'].includes(experiment))throw Error('NR_AUDIT must be bitscan or barriers');
+  const experiment=process.env.NR_AUDIT||'bitscan';if(!['bitscan','barriers','publication'].includes(experiment))throw Error('NR_AUDIT must be bitscan, barriers or publication');
   const results=await page.evaluate(async({specialization,nativeHalf,experiment})=>{
     const {modelFromDll}=await import('/src/dll-model.js'),{NeuralRenderer}=await import('/src/engine.js');
     const model=await modelFromDll(document.querySelector('#local-model').files[0]);
     const hash=async a=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',a)),v=>v.toString(16).padStart(2,'0')).join('');
     const cases=[];
     for(const [width,height] of [[1280,720],[1920,1080]]) {
+      const create=async edited=>{
+        const originalFetch=globalThis.fetch;let changed=0;
+        if(edited)globalThis.fetch=async(...args)=>{
+          const response=await originalFetch(...args),url=String(args[0]);
+          if(!url.endsWith('.json')||url.endsWith('/manifest.json'))return response;
+          const artifact=await response.json();
+          if(typeof artifact.wgsl==='string'){
+            if(experiment==='barriers'&&url.endsWith('_half.json')&&artifact.wgsl.includes('storageBarrier();')){
+              artifact.wgsl=artifact.wgsl.replaceAll('storageBarrier();','');changed++;
+            }else if(experiment==='publication'&&/_1_[01]_half.json$/.test(url)){
+              const publication=/(fn f_nr_quant\([^]*?\) -> f32 \{)[^]*?\n\}/;
+              if(publication.test(artifact.wgsl)){artifact.wgsl=artifact.wgsl.replace(publication,'$1\n  return cw_arg_v;\n}');changed++;}
+            }else if(experiment==='bitscan'){
+              const scan=/var v_msb: u32 = [^;]*countLeadingZeros[^;]*;/;
+              if(scan.test(artifact.wgsl)){
+                artifact.wgsl=artifact.wgsl.replace(scan,'var v_msb: u32 = 0u; var v_t: u32 = v_mag; loop { if(v_t <= 1u){break;} v_t >>= 1u; v_msb += 1u; }');changed++;
+              }
+            }
+          }
+          return new Response(JSON.stringify(artifact),{headers:{'Content-Type':'application/json'}});
+        };
+        try{
+          const renderer=await NeuralRenderer.create(model,{nativeHalf:true});
+          if(edited&&!changed){renderer.dispose();throw Error('No eligible emitted shaders changed');}
+          return renderer;
+        }finally{globalThis.fetch=originalFetch;}
+      };
       const setupStarted=performance.now();
-      const baseline=await NeuralRenderer.create(model,{nativeHalf:true});const baselineSetupMs=performance.now()-setupStarted;
-      const candidateStarted=performance.now(),originalFetch=globalThis.fetch;
-      let changed=0;
-      globalThis.fetch=async(...args)=>{const r=await originalFetch(...args);if(String(args[0]).endsWith('_half.json')){const a=await r.json();const scan=/var v_msb: u32 = 0u;\s*var v_t: u32 = v_mag;\s*\{\s*loop \{\s*if \(!\(v_t > 1u\)\) \{ break; \}\s*v_t = \(v_t >> 1u\);\s*v_msb = \(v_msb \+ 1u\);\s*\}\s*\}/;if(experiment==='barriers'&&a.wgsl.includes('storageBarrier();')){a.wgsl=a.wgsl.replaceAll('storageBarrier();','');changed++;}else if(experiment==='bitscan'&&scan.test(a.wgsl)){a.wgsl=a.wgsl.replace(scan,'var v_msb: u32 = firstLeadingBit(v_mag);');changed++;}return new Response(JSON.stringify(a),{headers:{'Content-Type':'application/json'}});}return r;};
-      let candidate;try{candidate=await NeuralRenderer.create(model,{nativeHalf:true});}finally{globalThis.fetch=originalFetch;}
-      if(!changed)throw Error('No eligible emitted shaders changed');
-      const candidateSetupMs=performance.now()-candidateStarted;
+      // Bit-scan comparison restores the old loop only in the baseline; candidate is production CUDA.
+      const baseline=await create(experiment==='bitscan'),baselineSetupMs=performance.now()-setupStarted;
+      const candidateStarted=performance.now(),candidate=await create(experiment!=='bitscan'),candidateSetupMs=performance.now()-candidateStarted;
       const engines=[baseline,candidate],samples=[[],[]];
       const proxy=Float32Array.from({length:width*height*4},(_,i)=>{const p=i>>2;return i%4===3?1:i%4===0?(p%width)/(width-1):i%4===1?Math.floor(p/width)/(height-1):0.4;});
       let expected,adapter;

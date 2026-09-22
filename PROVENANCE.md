@@ -2,8 +2,8 @@
 
 Original work in this repository is copyright (c) 2026 SamG-Coder. See [LICENSE](LICENSE) for the project license and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for retained upstream notices.
 
-- Native specification/source: `https://github.com/maanHimself/OpenDLSS-NR`, revision `9d08f41` (full revision recorded in `reports/validation-summary.json`). Only native sources and documentation were used. The existing browser port was not used.
-- Compiler/runtime: `https://github.com/SamG-Coder/cuda-webshader`, revision `5aa80e3`. The bit-reinterpretation and adapter-buffer-limit patches are now upstream (`390f6c1`, `166056c`), alongside native local/shared half support (`5aa80e3`). Historical patches remain in `patches/`.
+- Native specification/source: `https://github.com/maanHimself/OpenDLSS-NR`, revision `9d08f41` (full revision recorded in `reports/validation-summary.json`). The reconstruction was built from native sources and documentation. The browser port is inspected separately for performance comparisons; its shader implementations are not incorporated or redistributed.
+- Compiler/runtime: `https://github.com/SamG-Coder/cuda-webshader`, revision `b8e8cd0`. The bit-reinterpretation and adapter-buffer-limit patches are now upstream (`390f6c1`, `166056c`), alongside native local/shared half support (`5aa80e3`) and 32-bit CUDA `__clz` support (`b8e8cd0`). Historical patches remain in `patches/`.
 - Optional 3D input preview: `three` 0.186.0 (MIT), installed from npm and served locally. Uses the official GLTFLoader, OrbitControls, Draco/KTX2 loaders and Meshopt decoder. Three.js rasterizes an input frame; NR inference remains in the reconstructed CUDA kernels.
 
 | Reconstructed code | Native source |

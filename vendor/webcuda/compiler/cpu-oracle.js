@@ -130,6 +130,7 @@ class Context {
       else args.push(n.groupArgs?.[i]?null:yield* (n.referenceArgs?.[i]?this.ref(a):this.eval(a)));
     }
     if(['sincosf','__sincosf'].includes(name)){const phase=f(args[0]),s=f(Math.sin(phase)),c=f(Math.cos(phase));args[1].set(s);args[2].set(c);return;}
+    if(name==='__clz')return Math.clz32(args[0]);
     if(name==='__popc'){let x=args[0]>>>0,count=0;while(x){x=(x&(x-1))>>>0;count++;}return count;}
     if(name==='__ffs'){const x=args[0]|0;return x===0?0:32-Math.clz32(x&-x);}
     if(name==='__mul24')return Math.imul((args[0]<<8)>>8,(args[1]<<8)>>8);

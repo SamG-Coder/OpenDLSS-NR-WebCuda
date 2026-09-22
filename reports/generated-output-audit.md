@@ -1,5 +1,7 @@
 # Audit of emitted WGSL
 
+Historical diagnostic snapshot. CUDA `__clz` is now implemented and validated; see [the subsequent full-network comparison](full-shader-comparison.md) for current timings and the production result.
+
 Inspected WebCuda 5aa80e3 output from renderer af26c75, alongside the locally generated upstream production shader at 9d08f41. No upstream shader is copied into this repository or used by the application. This is a WGSL source audit and paired GPU timing experiment, not inspection of the browser driver's final machine instructions.
 
 ## Measured changes to emitted shaders

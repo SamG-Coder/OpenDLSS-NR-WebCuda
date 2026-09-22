@@ -656,6 +656,7 @@ class Emitter {
     if (n.callee.kind !== 'id') this.fail('Only named functions are supported.', n);
     const name = n.callee.name; n.callName = name;
     if(name.startsWith('cw_native_tile_'))return emitNativeTile(this,n,name);
+    if(name==='__clz'){if(n.args.length!==1)this.fail('__clz requires one 32-bit integer.',n);const a=this.expr(n.args[0]);if(!['i32','u32'].includes(a.type))this.fail('__clz requires one 32-bit integer.',n);return this.result(n,'i32',`i32(countLeadingZeros(u32(${a.code})))`,a.pre);}
     if(name==='__popc'){if(n.args.length!==1)this.fail('__popc requires one integer.',n);const a=this.expr(n.args[0]);if(!['i32','u32'].includes(a.type))this.fail('__popc requires an integer.',n);return this.result(n,'i32',`i32(countOneBits(u32(${a.code})))`,a.pre);}
     if(name==='__ffs'){
       if(n.args.length!==1)this.fail('__ffs requires one 32-bit integer.',n);const a=this.expr(n.args[0]);if(!['i32','u32'].includes(a.type))this.fail('__ffs requires one 32-bit integer.',n);return this.result(n,'i32',`(i32(firstTrailingBit(u32(${a.code}))) + 1i)`,a.pre);

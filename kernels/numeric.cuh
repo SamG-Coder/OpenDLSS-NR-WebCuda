@@ -90,9 +90,7 @@ __device__ float nr_fixed_half(int sum, int exponent) {
   if (sum == 0) return 0.0f;
   unsigned sign = sum < 0 ? 32768u : 0u;
   unsigned mag = (unsigned)(sum < 0 ? -sum : sum);
-  unsigned msb = 0u;
-  unsigned t = mag;
-  while (t > 1u) { t >>= 1u; msb += 1u; }
+  unsigned msb = 31u - (unsigned)__clz(mag);
   int e = (int)msb + exponent;
   unsigned h = sign;
   if (e >= -14) {
