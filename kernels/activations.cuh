@@ -25,6 +25,9 @@ __device__ void nr_activation_store4(unsigned* data, unsigned index, float a, fl
   if (format == 1) {
     unsigned word = nr_e4_code(a) | (nr_e4_code(b) << 8u) | (nr_e4_code(c) << 16u) | (nr_e4_code(d) << 24u);
     atomicExch(&data[index >> 2u], word);
+  } else if (format == 2) {
+    atomicExch(&data[index >> 1u], nr_half_bits(a) | (nr_half_bits(b) << 16u));
+    atomicExch(&data[(index >> 1u) + 1u], nr_half_bits(c) | (nr_half_bits(d) << 16u));
   } else {
     nr_activation_store(data, index, a, format);
     nr_activation_store(data, index + 1u, b, format);

@@ -39,6 +39,15 @@ export async function build() {
     await compact(source,entry,[rows*cols,1,1]);
     manifest[entry]=entry+'.json';console.log(entry+': '+artifact.wgsl.length+' bytes WGSL');
   }
+  const multiTemplate=await readFile('kernels/gemm-multi.cu','utf8');
+  for(const [rows,cols] of [[8,32],[16,16],[16,32],[4,32],[32,32],[16,64]]) {
+    const entry=`nr_gemm_multi${rows}x${cols}`,workgroupSize=[rows*cols/4,1,1];
+    const source=header+'\n'+multiTemplate.replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace('#define NR_MULTI_ROWS 8','#define NR_MULTI_ROWS '+rows).replace('#define NR_MULTI_COLS 32','#define NR_MULTI_COLS '+cols).replace('#define NR_MULTI_ENTRY nr_gemm_multi8x32','#define NR_MULTI_ENTRY '+entry);
+    const artifact=compile(source,{entry,workgroupSize});
+    await writeFile('generated/'+entry+'.cu',source);
+    await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));
+    manifest[entry]=entry+'.json';await compact(source,entry,workgroupSize);
+  }
   await writeFile('generated/manifest.json',JSON.stringify(manifest,null,2));
   return manifest;
 }

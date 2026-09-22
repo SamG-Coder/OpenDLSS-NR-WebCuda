@@ -10,7 +10,7 @@ export class NeuralRenderer {
     const {workspaceCacheBytes=256*1024*1024,gemmMode='auto',attentionMode='fused',activationStorage='packed',executionMode='prepared',planCacheBytes=1024*1024*1024,graphBatchSize=32,...runtimeOptions}=options;
     if(!Number.isInteger(graphBatchSize)||graphBatchSize<1||graphBatchSize>64)throw Error('Graph batch size must be 1 through 64.');
     if(!Number.isSafeInteger(workspaceCacheBytes)||workspaceCacheBytes<0)throw Error('Invalid workspace cache budget.');
-    if(!['auto','tiled','scalar','tile8x8','tile8x16'].includes(gemmMode))throw Error('Invalid GEMM mode.');
+    if(!['auto','multi-auto','tiled','scalar','tile8x8','tile8x16','multi8x32','multi16x16','multi16x32','multi4x32','multi32x32','multi16x64'].includes(gemmMode))throw Error('Invalid GEMM mode.');
     if(!['fused','tiled','scalar'].includes(attentionMode))throw Error('Invalid attention mode.');
     if(!['prepared','streamed'].includes(executionMode)||!Number.isSafeInteger(planCacheBytes)||planCacheBytes<0)throw Error('Invalid execution plan options.');
     if(!['float','packed'].includes(activationStorage))throw Error('Invalid activation storage mode.');
@@ -18,7 +18,9 @@ export class NeuralRenderer {
     try {
       const response=await fetch(new URL('../generated/manifest.json',import.meta.url));if(!response.ok)throw Error('Run npm run build before starting.');
       const manifest=await response.json();
-      for(const [entry,file] of Object.entries(manifest)) {const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
+      for(const [entry,file] of Object.entries(manifest)) {
+        if(entry.startsWith('nr_gemm_multi')&&!entry.startsWith('nr_gemm_'+(gemmMode==='multi-auto'?'multi32x32':gemmMode)))continue;
+        const r=await fetch(new URL('../generated/'+file,import.meta.url));if(!r.ok)throw Error('Missing kernel '+file);kernels[entry]=await runtime.kernel(await r.json());}
       return new NeuralRenderer(runtime,kernels,model,{workspaceCacheBytes,gemmMode,attentionMode,activationStorage,executionMode,planCacheBytes,graphBatchSize});
     } catch(e) {runtime.dispose();throw e;}
   }

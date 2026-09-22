@@ -59,12 +59,23 @@ try {
     try {
       dispatch('nr_gemm_packed',bindings,scalars,count);
       const expectedRaw=await runtime.read(bindings.raw,Uint32Array),expected=await runtime.read(bindings.output,Uint32Array);
-      for(const [entry,tileRows,tileCols] of [['nr_gemm_tiled',4,16],['nr_gemm_tile8x8',8,8],['nr_gemm_tile8x16',8,16]]){
+      for(const [entry,tileRows,tileCols] of [['nr_gemm_tiled',4,16],['nr_gemm_tile8x8',8,8],['nr_gemm_tile8x16',8,16],['nr_gemm_multi8x32',8,32],['nr_gemm_multi16x16',16,16],['nr_gemm_multi16x32',16,32],['nr_gemm_multi4x32',4,32],['nr_gemm_multi32x32',32,32],['nr_gemm_multi16x64',16,64]]){
         runtime.write(bindings.raw,new Float32Array(count+17).fill(777));runtime.write(bindings.output,new Float32Array(count+17).fill(777));
         const groups=Math.ceil(rows/tileRows)*batches*Math.ceil(N/tileCols);
         runtime.batch().dispatch(kernels[entry].bind(bindings,scalars),[2,Math.ceil(groups/2),1]).submit();
         const actualRaw=await runtime.read(bindings.raw,Uint32Array),actual=await runtime.read(bindings.output,Uint32Array);
         check(entry+' matches scalar: tails, 2D dispatch, half='+halfMode+', partition='+shape.partition,actual.every((v,i)=>v===expected[i])&&actualRaw.every((v,i)=>v===expectedRaw[i]));
+        if(entry.startsWith('nr_gemm_multi'))for(const outputFormat of [1,2]) {
+          const rawWords=Math.ceil(count/2),outWords=Math.ceil(count/(outputFormat===1?4:2)),sentinel=0x5a5a5a5a;
+          const compactRaw=runtime.createBuffer(new Uint32Array(rawWords+4).fill(sentinel)),compactOutput=runtime.createBuffer(new Uint32Array(outWords+4).fill(sentinel));
+          try {
+            // quantize=1 publishes FP8 values; storing those in half must also be exact.
+            runtime.batch().dispatch(kernels[entry+'_compact'].bind({...bindings,raw:compactRaw,output:compactOutput},{...scalars,inputFormat:0,residualFormat:0,rawFormat:2,outputFormat,rawEnabled:1}),[2,Math.ceil(groups/2),1]).submit();
+            const rw=await runtime.read(compactRaw,Uint32Array),ow=await runtime.read(compactOutput,Uint32Array),rv=unpackActivations(rw,2,count),ov=unpackActivations(ow,outputFormat,count),er=new Float32Array(expectedRaw.buffer),eo=new Float32Array(expected.buffer);
+            check(entry+' compact matches scalar, format='+outputFormat+', half='+halfMode+', N='+N+', partition='+shape.partition,rv.every((v,i)=>Object.is(v,er[i]))&&ov.every((v,i)=>Object.is(v,eo[i]))&&rw.subarray(rawWords).every(v=>v===sentinel)&&ow.subarray(outWords).every(v=>v===sentinel));
+          }finally{runtime.destroyBuffer(compactRaw);runtime.destroyBuffer(compactOutput);}
+        }
+
       }
     } finally {for(const b of Object.values(bindings))runtime.destroyBuffer(b);}
   }
