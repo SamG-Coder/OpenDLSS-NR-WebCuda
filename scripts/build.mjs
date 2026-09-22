@@ -10,6 +10,7 @@ export async function build() {
   await mkdir('generated',{recursive:true});
   const header = (await readFile('kernels/numeric.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const fastHalf=(await readFile('kernels/fast-half.cuh','utf8')).replace(/^#pragma once\s*/m,'');
+  const vectorF13=(await readFile('kernels/vector-f13.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const packed = (await readFile('kernels/packed.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const activationHeader=(await readFile('kernels/activations.cuh','utf8')).replace(/^#pragma once\s*/m,'');
   const manifest = {};
@@ -35,7 +36,7 @@ export async function build() {
     }
   }
   {
-    const source=(await readFile('kernels/attention-normalized.cu','utf8')).replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "attention.cu"\s*/m,await readFile('generated/attention.cu','utf8')).replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
+    const source=(await readFile('kernels/attention-normalized.cu','utf8')).replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "vector-f13.cuh"\s*/m,vectorF13+'\n').replace(/^#include "attention.cu"\s*/m,await readFile('generated/attention.cu','utf8')).replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
     const entry='nr_local_attention_normalized',artifact=compile(source.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry,workgroupSize:[512,1,1]});
     await writeFile('generated/'+entry+'.cu',source);await writeFile('generated/'+entry+'.json',JSON.stringify(serializableArtifact(artifact)));manifest[entry]=entry+'.json';
   }
@@ -82,7 +83,7 @@ export async function build() {
       const halfArtifact=compile(halfSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:halfName,workgroupSize:base.metadata.workgroupSize});
       await writeFile('generated/'+halfName+'.cu',halfSource);await writeFile('generated/'+halfName+'.json',JSON.stringify(serializableArtifact(halfArtifact)));manifest[halfName]=halfName+'.json';
       if([scalars.K,scalars.N,scalars.inputStride,scalars.inputBatchStride].every(n=>n%4===0)&&[1,2].includes(scalars.outputFormat)&&(!scalars.rawEnabled||scalars.rawFormat===2)){
-        const wideCuda=header+'\n'+wideTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
+        const wideCuda=header+'\n'+wideTemplate.replace(/^#include "fast-half.cuh"\s*/m,fastHalf+'\n').replace(/^#include "vector-f13.cuh"\s*/m,vectorF13+'\n').replace(/^#include "numeric.cuh"\s*/m,'').replace(/^#include "packed.cuh"\s*/m,packed+'\n').replace(/^#include "activations.cuh"\s*/m,activationHeader+'\n');
         const wideName=name+'_wide_half',wideSource=specializeGemmSource(wideCuda,'nr_gemm_wide',wideName,scalars);
         const wideArtifact=compile(wideSource.replace(/^#include <cuda_fp16.h>\s*/m,''),{entry:wideName,workgroupSize:[128,1,1]});
         await writeFile('generated/'+wideName+'.cu',wideSource);await writeFile('generated/'+wideName+'.json',JSON.stringify(serializableArtifact(wideArtifact)));manifest[wideName]=wideName+'.json';

@@ -3,11 +3,7 @@
 #include "fast-half.cuh"
 #include "packed.cuh"
 #include "activations.cuh"
-// Every F13 term and partial sum is an integer below the exact f32 limit.
-// Keep four ordered accumulators together without a per-product float/int cast.
-__device__ float4 nr_accumulate4(float4 sum,float4 product,float4 scale){
-  return make_float4(sum.x+truncf(product.x*scale.x),sum.y+truncf(product.y*scale.y),sum.z+truncf(product.z*scale.z),sum.w+truncf(product.w*scale.w));
-}
+#include "vector-f13.cuh"
 // Requires packed FP8 input, bounded weights, four-element-aligned dimensions
 // and input strides, and packed outputs. The build enforces this specialization.
 // Each invocation owns eight outputs across two rows; each row has four consecutive columns and therefore every output word it writes.
@@ -79,14 +75,8 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
     for(unsigned part=0u;part<2u;part+=1u){
       unsigned kg=kb+part*16u;
       if(kg<K){
-        int e0=acc0!=0.0f?nr_exp(acc0,-14):-21;
-        int e1=acc1!=0.0f?nr_exp(acc1,-14):-21;
-        int e2=acc2!=0.0f?nr_exp(acc2,-14):-21;
-        int e3=acc3!=0.0f?nr_exp(acc3,-14):-21;
-        int e4=acc4!=0.0f?nr_exp(acc4,-14):-21;
-        int e5=acc5!=0.0f?nr_exp(acc5,-14):-21;
-        int e6=acc6!=0.0f?nr_exp(acc6,-14):-21;
-        int e7=acc7!=0.0f?nr_exp(acc7,-14):-21;
+        float4 exponents0=nr_exponent4(make_float4(acc0,acc1,acc2,acc3));
+        float4 exponents1=nr_exponent4(make_float4(acc4,acc5,acc6,acc7));
         #pragma unroll
         for(unsigned j=0u;j<8u;j+=1u){
           unsigned k=part*8u+j;
@@ -94,25 +84,29 @@ __global__ void nr_gemm_wide(const float* metadata, const float* siluTable, cons
           __half2 a1=expA[(localRow+1u)*16u+k];
           __half2 b0=expB[(tid%8u*4u+0u)*17u+k];
           float2 ex0=__half22float2(__hadd2(a0,b0));
-          e0=max(e0,max((int)ex0.x,(int)ex0.y));
           float2 ex4=__half22float2(__hadd2(a1,b0));
-          e4=max(e4,max((int)ex4.x,(int)ex4.y));
           __half2 b1=expB[(tid%8u*4u+1u)*17u+k];
           float2 ex1=__half22float2(__hadd2(a0,b1));
-          e1=max(e1,max((int)ex1.x,(int)ex1.y));
           float2 ex5=__half22float2(__hadd2(a1,b1));
-          e5=max(e5,max((int)ex5.x,(int)ex5.y));
           __half2 b2=expB[(tid%8u*4u+2u)*17u+k];
           float2 ex2=__half22float2(__hadd2(a0,b2));
-          e2=max(e2,max((int)ex2.x,(int)ex2.y));
           float2 ex6=__half22float2(__hadd2(a1,b2));
-          e6=max(e6,max((int)ex6.x,(int)ex6.y));
           __half2 b3=expB[(tid%8u*4u+3u)*17u+k];
           float2 ex3=__half22float2(__hadd2(a0,b3));
-          e3=max(e3,max((int)ex3.x,(int)ex3.y));
           float2 ex7=__half22float2(__hadd2(a1,b3));
-          e7=max(e7,max((int)ex7.x,(int)ex7.y));
+          exponents0=nr_max4(exponents0,make_float4(ex0.x,ex1.x,ex2.x,ex3.x));
+          exponents0=nr_max4(exponents0,make_float4(ex0.y,ex1.y,ex2.y,ex3.y));
+          exponents1=nr_max4(exponents1,make_float4(ex4.x,ex5.x,ex6.x,ex7.x));
+          exponents1=nr_max4(exponents1,make_float4(ex4.y,ex5.y,ex6.y,ex7.y));
         }
+        int e0=(int)exponents0.x;
+        int e1=(int)exponents0.y;
+        int e2=(int)exponents0.z;
+        int e3=(int)exponents0.w;
+        int e4=(int)exponents1.x;
+        int e5=(int)exponents1.y;
+        int e6=(int)exponents1.z;
+        int e7=(int)exponents1.w;
         float4 sums0=make_float4(isfinite(acc0)?truncf(acc0*nr_pow2(13-e0)):0.0f,isfinite(acc1)?truncf(acc1*nr_pow2(13-e1)):0.0f,isfinite(acc2)?truncf(acc2*nr_pow2(13-e2)):0.0f,isfinite(acc3)?truncf(acc3*nr_pow2(13-e3)):0.0f);
         float4 scales0=make_float4(nr_pow2(9-e0),nr_pow2(9-e1),nr_pow2(9-e2),nr_pow2(9-e3));
         float4 sums1=make_float4(isfinite(acc4)?truncf(acc4*nr_pow2(13-e4)):0.0f,isfinite(acc5)?truncf(acc5*nr_pow2(13-e5)):0.0f,isfinite(acc6)?truncf(acc6*nr_pow2(13-e6)):0.0f,isfinite(acc7)?truncf(acc7*nr_pow2(13-e7)):0.0f);

@@ -18,6 +18,11 @@ export function vectorConstructor(emitter, nodes) {
     if(first.kind==='call'&&first.callee.kind==='id'&&unary[first.callee.name]&&parts.every(n=>n.kind==='call'&&n.callee.kind==='id'&&n.callee.name===first.callee.name&&n.args.length===1)){
       const a=combine(parts.map(n=>n.args[0]));return a===null?null:`${unary[first.callee.name]}(${a})`;
     }
+    const binary={fmaxf:'max',fminf:'min'};
+    if(first.kind==='call'&&first.callee.kind==='id'&&binary[first.callee.name]&&parts.every(n=>n.kind==='call'&&n.callee.kind==='id'&&n.callee.name===first.callee.name&&n.args.length===2)){
+      const a=combine(parts.map(n=>n.args[0])),b=combine(parts.map(n=>n.args[1]));
+      return a===null||b===null?null:`${binary[first.callee.name]}(${a}, ${b})`;
+    }
     return null;
   }
   return combine(nodes);

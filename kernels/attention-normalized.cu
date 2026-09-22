@@ -1,6 +1,7 @@
 #include <cuda_fp16.h>
 #include "attention.cu"
 #include "fast-half.cuh"
+#include "vector-f13.cuh"
 #include "activations.cuh"
 __global__ void nr_local_attention_normalized(const unsigned* qkv, const float* prior, const float* scales, unsigned* output, unsigned width, unsigned height, unsigned heads, unsigned shiftX, unsigned shiftY) {
   __shared__ float queries[1024];
@@ -55,15 +56,17 @@ __global__ void nr_local_attention_normalized(const unsigned* qkv, const float* 
     unsigned key = keyBase + tid % 16u;
     float acc = prior[(head * 64u + queryBase + query) * 64u + key];
     for (unsigned kb = 0u; kb < 32u; kb += 16u) {
-      int e = acc != 0.0f ? nr_exp(acc, -14) : -21;
+      float exponent = acc != 0.0f ? (float)nr_exp(acc, -14) : -21.0f;
       #pragma unroll
       for (unsigned c = 0u; c < 16u; c += 1u) {
-        e = max(e, (int)__half2float(queryExp[query*32u+kb+c]) + (int)__half2float(tileExp[key*33u+kb+c]));
+        exponent = fmaxf(exponent, __half2float(queryExp[query*32u+kb+c]) + __half2float(tileExp[key*33u+kb+c]));
       }
-      int sum = (int)truncf(acc * nr_pow2(13 - e));
+      int e=(int)exponent;
+      float scale=nr_pow2(13-e);
+      float sum = truncf(acc * scale);
       #pragma unroll
-      for (unsigned c = 0u; c < 16u; c += 1u) sum += (int)truncf(queries[query * 32u + kb + c] * tileData[key * 33u + kb + c] * nr_pow2(13 - e));
-      acc = nr_fast_fixed_half(sum, e - 13);
+      for (unsigned c = 0u; c < 16u; c += 1u) sum += truncf(queries[query * 32u + kb + c] * tileData[key * 33u + kb + c] * scale);
+      acc = nr_fast_fixed_half((int)sum, e - 13);
     }
     probabilities[query * 65u + key] = nr_exp_weight(acc, 0);
   }
@@ -101,25 +104,32 @@ __global__ void nr_local_attention_normalized(const unsigned* qkv, const float* 
     tileExp[slot]=__float2half_rn(tileData[slot]==0.0f?-128.0f:(float)nr_exp(tileData[slot],-6));
   }
   __syncthreads();
-  int row = nr_window_row(queryBase + query, window, width, height, shiftX, shiftY);
-  for (unsigned channelBase = 0u; channelBase < 32u; channelBase += 16u) {
-    unsigned channel = channelBase + tid % 16u;
-    float acc = 0.0f;
-    for (unsigned kb = 0u; kb < 64u; kb += 16u) {
-      int e = acc != 0.0f ? nr_exp(acc, -14) : -21;
-      #pragma unroll
-      for (unsigned j = 0u; j < 16u; j += 1u) {
-        e = max(e, (int)__half2float(probabilityExp[query*65u+kb+j]) + (int)__half2float(tileExp[(kb+j)*33u+channel]));
-      }
-      if (isfinite(acc)) {
-        int sum = (int)truncf(acc * nr_pow2(13 - e));
-        #pragma unroll
-        for (unsigned j = 0u; j < 16u; j += 1u) sum += (int)truncf(probabilities[query * 65u + kb + j] * tileData[(kb + j) * 33u + channel] * nr_pow2(13 - e));
-        acc = nr_fast_fixed_half(sum, e - 13);
-      }
+  // Two adjacent channels share each probability while all 512 lanes work.
+  unsigned channel=tid%16u*2u;
+  float2 acc=make_float2(0.0f,0.0f);
+  for(unsigned kb=0u;kb<64u;kb+=16u){
+    float2 e=make_float2(acc.x!=0.0f?(float)nr_exp(acc.x,-14):-21.0f,acc.y!=0.0f?(float)nr_exp(acc.y,-14):-21.0f);
+    #pragma unroll
+    for(unsigned j=0u;j<16u;j+=1u){
+      float a=__half2float(probabilityExp[query*65u+kb+j]);
+      unsigned slot=(kb+j)*33u+channel;
+      float2 b=make_float2(a+__half2float(tileExp[slot]),a+__half2float(tileExp[slot+1u]));
+      e=nr_max2(e,b);
     }
-    queries[query * 32u + channel] = nr_quant(acc);
+    float2 scale=make_float2(nr_pow2(13-(int)e.x),nr_pow2(13-(int)e.y));
+    float2 sum=make_float2(isfinite(acc.x)?truncf(acc.x*scale.x):0.0f,isfinite(acc.y)?truncf(acc.y*scale.y):0.0f);
+    #pragma unroll
+    for(unsigned j=0u;j<16u;j+=1u){
+      float a=probabilities[query*65u+kb+j];
+      unsigned slot=(kb+j)*33u+channel;
+      float2 product=make_float2(a*tileData[slot],a*tileData[slot+1u]);
+      sum=nr_accumulate2(sum,product,scale);
+    }
+    if(isfinite(acc.x))acc.x=nr_fast_fixed_half((int)sum.x,(int)e.x-13);
+    if(isfinite(acc.y))acc.y=nr_fast_fixed_half((int)sum.y,(int)e.y-13);
   }
+  queries[query*32u+channel]=acc.x;
+  queries[query*32u+channel+1u]=acc.y;
   __syncthreads();
   // A lane owns four consecutive channels, allowing one packed-word store.
   if (tid < 256u) {
